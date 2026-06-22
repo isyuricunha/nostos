@@ -22,10 +22,15 @@ type Service struct {
 	audit     auth.Repository
 	providers ProviderResolver
 	client    *providers.OpenAIClient
+	summaries ConversationSummaryHandler
 }
 
 type ProviderResolver interface {
 	ResolveForChat(ctx context.Context, workspaceID string, providerID string) (providers.Provider, string, error)
+}
+
+type ConversationSummaryHandler interface {
+	UpdateConversationSummaries(ctx context.Context, limit int) (string, error)
 }
 
 func NewService(cfg config.Config, repo Repository, audit auth.Repository) *Service {
@@ -35,6 +40,11 @@ func NewService(cfg config.Config, repo Repository, audit auth.Repository) *Serv
 func (s *Service) WithProviderClient(resolver ProviderResolver, client *providers.OpenAIClient) *Service {
 	s.providers = resolver
 	s.client = client
+	return s
+}
+
+func (s *Service) WithConversationSummaryHandler(handler ConversationSummaryHandler) *Service {
+	s.summaries = handler
 	return s
 }
 
@@ -167,6 +177,18 @@ func (s *Service) RunNow(ctx context.Context, principal PrincipalContext, taskID
 		return Run{}, ErrNotFound
 	}
 	return s.enqueueTask(ctx, task, "", "manual:"+task.ID+":"+time.Now().UTC().Format(time.RFC3339Nano), 0)
+}
+
+func (s *Service) EnqueueConversationSummary(ctx context.Context, workspaceID string, conversationID string) error {
+	if err := s.ensureSystemTasksForWorkspace(ctx, workspaceID); err != nil {
+		return err
+	}
+	task, err := s.repo.GetSystemTaskByName(ctx, workspaceID, "update_conversation_summaries")
+	if err != nil {
+		return err
+	}
+	_, err = s.enqueueTask(ctx, task, "", "summary:"+conversationID+":"+time.Now().UTC().Format(time.RFC3339Nano), 0)
+	return err
 }
 
 func (s *Service) CancelRun(ctx context.Context, principal PrincipalContext, runID string) error {
@@ -419,7 +441,7 @@ func (s *Service) enqueueTask(ctx context.Context, task Task, scheduleID string,
 
 func (s *Service) execute(ctx context.Context, task Task) (string, error) {
 	if task.TaskType == TaskTypeSystem {
-		return "System task completed: " + task.Name, nil
+		return s.executeSystemTask(ctx, task)
 	}
 	if task.ProviderID == "" || task.Model == "" {
 		return "", errors.New("agent task requires provider_id and model")
@@ -463,6 +485,18 @@ func (s *Service) execute(ctx context.Context, task Task) (string, error) {
 		return "", errors.New("provider returned an empty task result")
 	}
 	return text, nil
+}
+
+func (s *Service) executeSystemTask(ctx context.Context, task Task) (string, error) {
+	switch task.Name {
+	case "update_conversation_summaries":
+		if s.summaries == nil {
+			return "", errors.New("conversation summary handler is not configured")
+		}
+		return s.summaries.UpdateConversationSummaries(ctx, 10)
+	default:
+		return "System task completed with no eligible records: " + task.Name, nil
+	}
 }
 
 func nextRun(schedule Schedule, now time.Time, defaultTimezone string) *time.Time {

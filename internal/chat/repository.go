@@ -20,6 +20,11 @@ type Repository interface {
 	CreateConversation(ctx context.Context, conversation Conversation) (Conversation, error)
 	GetConversation(ctx context.Context, workspaceID string, ownerUserID string, conversationID string) (Conversation, error)
 	UpdateConversation(ctx context.Context, conversation Conversation) (Conversation, error)
+	MarkSummaryQueued(ctx context.Context, workspaceID string, ownerUserID string, conversationID string) (Conversation, bool, error)
+	MarkSummaryRunning(ctx context.Context, conversationID string) error
+	SaveConversationSummary(ctx context.Context, conversationID string, update SummaryUpdate) error
+	MarkSummaryFailed(ctx context.Context, conversationID string, message string) error
+	SummaryCandidates(ctx context.Context, limit int) ([]Conversation, error)
 	DeleteConversation(ctx context.Context, workspaceID string, ownerUserID string, conversationID string, now time.Time) error
 	CreateMessage(ctx context.Context, message Message) (Message, error)
 	GetMessage(ctx context.Context, workspaceID string, ownerUserID string, messageID string) (Message, error)
@@ -52,7 +57,7 @@ func NewSQLRepository(store *database.Store) *SQLRepository {
 
 func (r *SQLRepository) ListConversations(ctx context.Context, workspaceID string, ownerUserID string, search string) ([]Conversation, error) {
 	args := []any{workspaceID, ownerUserID}
-	query := `SELECT id, workspace_id, owner_user_id, agent_id, provider_id, model, title, summary, summary_updated_at, archived_at, deleted_at, created_at, updated_at
+	query := conversationSelect() + `
 FROM conversations WHERE workspace_id = ` + r.store.Placeholder(1) + ` AND owner_user_id = ` + r.store.Placeholder(2) + ` AND deleted_at IS NULL`
 	if strings.TrimSpace(search) != "" {
 		args = append(args, "%"+strings.ToLower(strings.TrimSpace(search))+"%")
@@ -93,7 +98,7 @@ VALUES (` + placeholders(r.store, 10) + `)`
 }
 
 func (r *SQLRepository) GetConversation(ctx context.Context, workspaceID string, ownerUserID string, conversationID string) (Conversation, error) {
-	query := `SELECT id, workspace_id, owner_user_id, agent_id, provider_id, model, title, summary, summary_updated_at, archived_at, deleted_at, created_at, updated_at
+	query := conversationSelect() + `
 FROM conversations WHERE workspace_id = ` + r.store.Placeholder(1) + ` AND owner_user_id = ` + r.store.Placeholder(2) + ` AND id = ` + r.store.Placeholder(3) + ` AND deleted_at IS NULL`
 	item, err := scanConversation(r.store.DB.QueryRowContext(ctx, query, workspaceID, ownerUserID, conversationID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -122,6 +127,97 @@ func (r *SQLRepository) UpdateConversation(ctx context.Context, conversation Con
 		return Conversation{}, ErrNotFound
 	}
 	return conversation, nil
+}
+
+func (r *SQLRepository) MarkSummaryQueued(ctx context.Context, workspaceID string, ownerUserID string, conversationID string) (Conversation, bool, error) {
+	now := time.Now().UTC()
+	query := `UPDATE conversations SET summary_status = ` + r.store.Placeholder(1) + `, summary_error = NULL, updated_at = ` + r.store.Placeholder(2) +
+		` WHERE workspace_id = ` + r.store.Placeholder(3) + ` AND owner_user_id = ` + r.store.Placeholder(4) + ` AND id = ` + r.store.Placeholder(5) +
+		` AND summary_status NOT IN (` + r.store.Placeholder(6) + `, ` + r.store.Placeholder(7) + `)`
+	result, err := r.store.DB.ExecContext(ctx, query, "queued", r.store.NowArg(now), workspaceID, ownerUserID, conversationID, "queued", "running")
+	if err != nil {
+		return Conversation{}, false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Conversation{}, false, err
+	}
+	conversation, getErr := r.GetConversation(ctx, workspaceID, ownerUserID, conversationID)
+	if getErr != nil {
+		return Conversation{}, false, getErr
+	}
+	return conversation, affected > 0, nil
+}
+
+func (r *SQLRepository) MarkSummaryRunning(ctx context.Context, conversationID string) error {
+	now := time.Now().UTC()
+	query := `UPDATE conversations SET summary_status = ` + r.store.Placeholder(1) + `, summary_error = NULL, updated_at = ` + r.store.Placeholder(2) +
+		` WHERE id = ` + r.store.Placeholder(3) + ` AND summary_status = ` + r.store.Placeholder(4)
+	_, err := r.store.DB.ExecContext(ctx, query, "running", r.store.NowArg(now), conversationID, "queued")
+	return err
+}
+
+func (r *SQLRepository) SaveConversationSummary(ctx context.Context, conversationID string, update SummaryUpdate) error {
+	now := time.Now().UTC()
+	generatedAt := update.GeneratedAt
+	if generatedAt == nil {
+		generatedAt = &now
+	}
+	versionExpr := "summary_version"
+	if update.IncrementVersion {
+		versionExpr = "summary_version + 1"
+	}
+	query := `UPDATE conversations SET summary = ` + r.store.Placeholder(1) + `, summary_updated_at = ` + r.store.Placeholder(2) +
+		`, summary_status = ` + r.store.Placeholder(3) + `, summary_error = ` + r.store.Placeholder(4) +
+		`, summary_source_start_message_id = ` + r.store.Placeholder(5) + `, summary_source_end_message_id = ` + r.store.Placeholder(6) +
+		`, summary_provider_id = ` + r.store.Placeholder(7) + `, summary_model = ` + r.store.Placeholder(8) +
+		`, summary_generated_at = ` + r.store.Placeholder(9) + `, summary_estimated_input_tokens = ` + r.store.Placeholder(10) +
+		`, summary_version = ` + versionExpr + `, updated_at = ` + r.store.Placeholder(11) + ` WHERE id = ` + r.store.Placeholder(12)
+	_, err := r.store.DB.ExecContext(ctx, query,
+		update.Summary,
+		r.store.NowArg(now),
+		update.Status,
+		nullableString(update.Error),
+		nullableString(update.SourceStartMessageID),
+		nullableString(update.SourceEndMessageID),
+		nullableString(update.ProviderID),
+		nullableString(update.Model),
+		timePtrArg(r.store, generatedAt),
+		nullInt(update.EstimatedInputTokens),
+		r.store.NowArg(now),
+		conversationID,
+	)
+	return err
+}
+
+func (r *SQLRepository) MarkSummaryFailed(ctx context.Context, conversationID string, message string) error {
+	now := time.Now().UTC()
+	query := `UPDATE conversations SET summary_status = ` + r.store.Placeholder(1) + `, summary_error = ` + r.store.Placeholder(2) +
+		`, updated_at = ` + r.store.Placeholder(3) + ` WHERE id = ` + r.store.Placeholder(4)
+	_, err := r.store.DB.ExecContext(ctx, query, "failed", nullableString(message), r.store.NowArg(now), conversationID)
+	return err
+}
+
+func (r *SQLRepository) SummaryCandidates(ctx context.Context, limit int) ([]Conversation, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	query := conversationSelect() + ` FROM conversations WHERE deleted_at IS NULL AND summary_status = ` + r.store.Placeholder(1) +
+		` ORDER BY updated_at ASC LIMIT ` + r.store.Placeholder(2)
+	rows, err := r.store.DB.QueryContext(ctx, query, "queued", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var conversations []Conversation
+	for rows.Next() {
+		item, err := scanConversation(rows)
+		if err != nil {
+			return nil, err
+		}
+		conversations = append(conversations, item)
+	}
+	return conversations, rows.Err()
 }
 
 func (r *SQLRepository) DeleteConversation(ctx context.Context, workspaceID string, ownerUserID string, conversationID string, now time.Time) error {
@@ -329,25 +425,56 @@ m.tool_call_id, m.metadata, m.prompt_tokens, m.completion_tokens, m.total_tokens
 FROM messages m JOIN conversations c ON c.id = m.conversation_id`
 }
 
+func conversationSelect() string {
+	return `SELECT id, workspace_id, owner_user_id, agent_id, provider_id, model, title, summary, summary_updated_at,
+summary_status, summary_error, summary_source_start_message_id, summary_source_end_message_id, summary_provider_id,
+summary_model, summary_generated_at, summary_estimated_input_tokens, summary_version, archived_at, deleted_at, created_at, updated_at`
+}
+
 func scanConversation(row rowScanner) (Conversation, error) {
 	var item Conversation
 	var agentID sql.NullString
 	var providerID sql.NullString
 	var model sql.NullString
 	var summaryUpdatedRaw any
+	var summaryStatus sql.NullString
+	var summaryError sql.NullString
+	var summarySourceStart sql.NullString
+	var summarySourceEnd sql.NullString
+	var summaryProviderID sql.NullString
+	var summaryModel sql.NullString
+	var summaryGeneratedRaw any
+	var summaryEstimated sql.NullInt64
+	var summaryVersion sql.NullInt64
 	var archivedRaw any
 	var deletedRaw any
 	var createdRaw any
 	var updatedRaw any
 	if err := row.Scan(&item.ID, &item.WorkspaceID, &item.OwnerUserID, &agentID, &providerID, &model, &item.Title, &item.Summary,
-		&summaryUpdatedRaw, &archivedRaw, &deletedRaw, &createdRaw, &updatedRaw); err != nil {
+		&summaryUpdatedRaw, &summaryStatus, &summaryError, &summarySourceStart, &summarySourceEnd, &summaryProviderID, &summaryModel,
+		&summaryGeneratedRaw, &summaryEstimated, &summaryVersion, &archivedRaw, &deletedRaw, &createdRaw, &updatedRaw); err != nil {
 		return Conversation{}, err
 	}
 	item.AgentID = agentID.String
 	item.ProviderID = providerID.String
 	item.Model = model.String
+	item.SummaryStatus = summaryStatus.String
+	if item.SummaryStatus == "" {
+		item.SummaryStatus = "idle"
+	}
+	item.SummaryError = summaryError.String
+	item.SummarySourceStartMessageID = summarySourceStart.String
+	item.SummarySourceEndMessageID = summarySourceEnd.String
+	item.SummaryProviderID = summaryProviderID.String
+	item.SummaryModel = summaryModel.String
+	item.SummaryEstimatedInputTokens = int(summaryEstimated.Int64)
+	item.SummaryVersion = int(summaryVersion.Int64)
 	var err error
 	item.SummaryUpdatedAt, err = nullableTime(summaryUpdatedRaw)
+	if err != nil {
+		return Conversation{}, err
+	}
+	item.SummaryGeneratedAt, err = nullableTime(summaryGeneratedRaw)
 	if err != nil {
 		return Conversation{}, err
 	}

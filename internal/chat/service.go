@@ -15,6 +15,7 @@ var ErrInvalidInput = errors.New("invalid chat input")
 
 type ProviderResolver interface {
 	ResolveForChat(ctx context.Context, workspaceID string, providerID string) (providers.Provider, string, error)
+	ResolveDefaultForChat(ctx context.Context, workspaceID string) (providers.Provider, string, error)
 }
 
 type AgentResolver interface {
@@ -31,6 +32,10 @@ type ToolProvider interface {
 	ExecuteAllowedTool(ctx context.Context, workspaceID string, name string, arguments string) (string, error)
 }
 
+type SummaryEnqueuer interface {
+	EnqueueConversationSummary(ctx context.Context, workspaceID string, conversationID string) error
+}
+
 type Service struct {
 	cfg       config.Config
 	repo      Repository
@@ -39,6 +44,7 @@ type Service struct {
 	agents    AgentResolver
 	memories  MemoryProvider
 	tools     ToolProvider
+	summaries SummaryEnqueuer
 }
 
 type StreamSink func(event string, payload any) error
@@ -56,6 +62,11 @@ func NewService(
 
 func (s *Service) WithToolProvider(toolProvider ToolProvider) *Service {
 	s.tools = toolProvider
+	return s
+}
+
+func (s *Service) WithSummaryEnqueuer(enqueuer SummaryEnqueuer) *Service {
+	s.summaries = enqueuer
 	return s
 }
 
@@ -283,13 +294,15 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 			}
 			_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), usage)
 			_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
+			s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, "", sink)
 			return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
 		}
 	}
 	if toolReady {
-		return s.executeToolFollowup(ctx, principal, run.ID, assistantMessage.ID, provider, apiKey, model, promptMessages, toolCalls, sink)
+		return s.executeToolFollowup(ctx, principal, run.ID, assistantMessage.ID, provider, apiKey, model, conversation, agent, memories, "", promptMessages, toolCalls, sink)
 	}
 	_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
+	s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, "", sink)
 	return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
 }
 
@@ -449,10 +462,12 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 		}
 		if event.Type == "run_completed" {
 			_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
+			s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, branch.ID, sink)
 			return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
 		}
 	}
 	_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
+	s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, branch.ID, sink)
 	return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
 }
 
@@ -499,6 +514,10 @@ func (s *Service) executeToolFollowup(
 	provider providers.Provider,
 	apiKey string,
 	model string,
+	conversation Conversation,
+	agent AgentContext,
+	memories []MemorySnippet,
+	branchID string,
 	baseMessages []providers.ChatMessage,
 	toolCalls []providers.ToolCall,
 	sink StreamSink,
@@ -565,10 +584,12 @@ func (s *Service) executeToolFollowup(
 		case "run_completed":
 			_ = s.repo.UpdateMessageContent(ctx, assistantMessageID, contentBuilder.String(), usage)
 			_ = s.repo.UpdateRunState(ctx, runID, RunCompleted, "", "", true)
+			s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, branchID, sink)
 			return sink("run_completed", map[string]any{"run_id": runID, "assistant_message_id": assistantMessageID})
 		}
 	}
 	_ = s.repo.UpdateRunState(ctx, runID, RunCompleted, "", "", true)
+	s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, branchID, sink)
 	return sink("run_completed", map[string]any{"run_id": runID, "assistant_message_id": assistantMessageID})
 }
 

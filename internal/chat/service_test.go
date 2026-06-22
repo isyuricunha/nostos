@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/isyuricunha/nostos/internal/config"
 	"github.com/isyuricunha/nostos/internal/database"
 	"github.com/isyuricunha/nostos/internal/providers"
+	"github.com/isyuricunha/nostos/internal/tasks"
 )
 
 func TestRunStreamsAndPersistsConversation(t *testing.T) {
@@ -266,6 +268,119 @@ func TestBuildPromptMessagesPreservesToolCallsAndResults(t *testing.T) {
 	}
 }
 
+func TestConversationSummaryQueueWorkerAndInjection(t *testing.T) {
+	ctx := context.Background()
+	var recorder requestRecorder
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		messages := recorder.record(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if containsContentSubstring(messages, "Older transcript to compact") {
+			writeStreamContent(w, "Summary: Yuri prefers Go for backend services.")
+			return
+		}
+		writeStreamContent(w, "Acknowledged.")
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newChatTestContext(t)
+	defer cleanup()
+	cfg.Chat.ContextThreshold = 20
+	cfg.Chat.RecentMessageLimit = 1
+	cfg.Tasks.DefaultTimeout = time.Minute
+	cfg.Tasks.MaxRetries = 3
+	authRepo := auth.NewSQLRepository(store)
+	providerClient := providers.NewOpenAIClient()
+	providerService := providers.NewService(cfg, providers.NewSQLRepository(store), authRepo, providerClient)
+	apiKey := "test-api-key"
+	provider, err := providerService.Create(ctx, providers.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, providers.ProviderInput{
+		Name:             "Mock",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	taskService := tasks.NewService(cfg, tasks.NewSQLRepository(store), authRepo).WithProviderClient(providerService, providerClient)
+	if err := taskService.EnsureSystemTasks(ctx); err != nil {
+		t.Fatalf("ensure system tasks: %v", err)
+	}
+	service := NewService(cfg, NewSQLRepository(store), providerService, providerClient, fakeAgentResolver{}, &fakeMemoryProvider{}).WithSummaryEnqueuer(taskService)
+	taskService.WithConversationSummaryHandler(service)
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	taskPrincipal := tasks.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	conversation, err := service.CreateConversation(ctx, principal, Conversation{Title: "Summary chat", ProviderID: provider.ID, Model: "mock-model"})
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	if err := service.Run(ctx, principal, conversation.ID, RunInput{Content: "My name is Yuri and I prefer Go for backend services."}, noopSink); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	queuedConversation, err := service.GetConversation(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("get queued conversation: %v", err)
+	}
+	if queuedConversation.SummaryStatus != "queued" {
+		t.Fatalf("expected queued summary status, got %#v", queuedConversation)
+	}
+	if _, queued, err := service.QueueSummary(ctx, principal, conversation.ID); err != nil || queued {
+		t.Fatalf("duplicate summary queue should be ignored while queued, queued=%v err=%v", queued, err)
+	}
+	summaryTask := findTaskRecord(t, taskService, taskPrincipal, "update_conversation_summaries")
+	runs, err := taskService.ListRuns(ctx, taskPrincipal, summaryTask.Task.ID)
+	if err != nil {
+		t.Fatalf("list summary task runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected one deduplicated summary run, got %d", len(runs))
+	}
+	if err := taskService.ClaimAndExecute(ctx, "summary-worker"); err != nil {
+		t.Fatalf("execute summary task: %v", err)
+	}
+	summarized, err := service.GetConversation(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("get summarized conversation: %v", err)
+	}
+	if summarized.Summary != "Summary: Yuri prefers Go for backend services." || summarized.SummaryStatus != "idle" {
+		t.Fatalf("summary was not stored correctly: %#v", summarized)
+	}
+	if summarized.SummarySourceStartMessageID == "" || summarized.SummarySourceEndMessageID == "" || summarized.SummaryProviderID != provider.ID || summarized.SummaryModel != "mock-model" || summarized.SummaryVersion != 1 {
+		t.Fatalf("summary metadata was not stored: %#v", summarized)
+	}
+	storedMessages, err := service.ListMessages(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("list messages after summary: %v", err)
+	}
+	if len(storedMessages) != 2 {
+		t.Fatalf("summary must not delete original messages, got %d", len(storedMessages))
+	}
+	if err := service.Run(ctx, principal, conversation.ID, RunInput{Content: "What context do you have?"}, noopSink); err != nil {
+		t.Fatalf("run after summary: %v", err)
+	}
+	if !anyRequestContains(recorder.requests(), "Conversation summary:\nSummary: Yuri prefers Go for backend services.") {
+		t.Fatalf("next chat request did not include stored summary: %#v", recorder.requests())
+	}
+	cleared, err := service.ClearSummary(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("clear summary: %v", err)
+	}
+	if cleared.Summary != "" || cleared.SummaryStatus != "idle" {
+		t.Fatalf("summary was not cleared: %#v", cleared)
+	}
+	_, queued, err := service.QueueSummary(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("manual regenerate queue: %v", err)
+	}
+	if !queued {
+		t.Fatal("expected manual regenerate to queue a new summary")
+	}
+}
+
 func TestRunExecutesAllowedToolAndStreamsFollowup(t *testing.T) {
 	ctx := context.Background()
 	requestCount := 0
@@ -398,6 +513,24 @@ func containsContent(messages []providers.ChatMessage, content string) bool {
 	return countContent(messages, content) > 0
 }
 
+func containsContentSubstring(messages []providers.ChatMessage, content string) bool {
+	for _, message := range messages {
+		if strings.Contains(message.Content, content) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyRequestContains(requests [][]providers.ChatMessage, content string) bool {
+	for _, request := range requests {
+		if containsContentSubstring(request, content) {
+			return true
+		}
+	}
+	return false
+}
+
 func countContent(messages []providers.ChatMessage, content string) int {
 	count := 0
 	for _, message := range messages {
@@ -426,6 +559,21 @@ func containsToolResult(messages []providers.ChatMessage, id string, content str
 		}
 	}
 	return false
+}
+
+func findTaskRecord(t *testing.T, service *tasks.Service, principal tasks.PrincipalContext, name string) tasks.TaskRecord {
+	t.Helper()
+	records, err := service.ListTaskRecords(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("list task records: %v", err)
+	}
+	for _, record := range records {
+		if record.Task.Name == name {
+			return record
+		}
+	}
+	t.Fatalf("task %q not found", name)
+	return tasks.TaskRecord{}
 }
 
 type fakeAgentResolver struct{}

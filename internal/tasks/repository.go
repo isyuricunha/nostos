@@ -33,6 +33,7 @@ type Repository interface {
 	RecoverExpiredLeases(ctx context.Context, now time.Time) (int64, error)
 	Workspaces(ctx context.Context) ([]string, error)
 	SystemTaskExists(ctx context.Context, workspaceID string, name string) (bool, error)
+	GetSystemTaskByName(ctx context.Context, workspaceID string, name string) (Task, error)
 }
 
 type SQLRepository struct {
@@ -348,6 +349,16 @@ func (r *SQLRepository) SystemTaskExists(ctx context.Context, workspaceID string
 	query := `SELECT COUNT(*) FROM tasks WHERE workspace_id = ` + r.store.Placeholder(1) + ` AND name = ` + r.store.Placeholder(2) + ` AND system_managed = ` + r.store.Placeholder(3)
 	err := r.store.DB.QueryRowContext(ctx, query, workspaceID, name, true).Scan(&count)
 	return count > 0, err
+}
+
+func (r *SQLRepository) GetSystemTaskByName(ctx context.Context, workspaceID string, name string) (Task, error) {
+	query := taskSelect(r.store) + ` WHERE workspace_id = ` + r.store.Placeholder(1) + ` AND name = ` + r.store.Placeholder(2) +
+		` AND system_managed = ` + r.store.Placeholder(3) + ` LIMIT 1`
+	task, err := scanTask(r.store.DB.QueryRowContext(ctx, query, workspaceID, name, true))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, ErrNotFound
+	}
+	return task, err
 }
 
 func taskSelect(store *database.Store) string {

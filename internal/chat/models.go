@@ -22,19 +22,28 @@ const (
 )
 
 type Conversation struct {
-	ID               string     `json:"id"`
-	WorkspaceID      string     `json:"workspace_id"`
-	OwnerUserID      string     `json:"owner_user_id"`
-	AgentID          string     `json:"agent_id,omitempty"`
-	ProviderID       string     `json:"provider_id,omitempty"`
-	Model            string     `json:"model,omitempty"`
-	Title            string     `json:"title"`
-	Summary          string     `json:"summary"`
-	SummaryUpdatedAt *time.Time `json:"summary_updated_at,omitempty"`
-	ArchivedAt       *time.Time `json:"archived_at,omitempty"`
-	DeletedAt        *time.Time `json:"deleted_at,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ID                          string     `json:"id"`
+	WorkspaceID                 string     `json:"workspace_id"`
+	OwnerUserID                 string     `json:"owner_user_id"`
+	AgentID                     string     `json:"agent_id,omitempty"`
+	ProviderID                  string     `json:"provider_id,omitempty"`
+	Model                       string     `json:"model,omitempty"`
+	Title                       string     `json:"title"`
+	Summary                     string     `json:"summary"`
+	SummaryUpdatedAt            *time.Time `json:"summary_updated_at,omitempty"`
+	SummaryStatus               string     `json:"summary_status"`
+	SummaryError                string     `json:"summary_error,omitempty"`
+	SummarySourceStartMessageID string     `json:"summary_source_start_message_id,omitempty"`
+	SummarySourceEndMessageID   string     `json:"summary_source_end_message_id,omitempty"`
+	SummaryProviderID           string     `json:"summary_provider_id,omitempty"`
+	SummaryModel                string     `json:"summary_model,omitempty"`
+	SummaryGeneratedAt          *time.Time `json:"summary_generated_at,omitempty"`
+	SummaryEstimatedInputTokens int        `json:"summary_estimated_input_tokens,omitempty"`
+	SummaryVersion              int        `json:"summary_version"`
+	ArchivedAt                  *time.Time `json:"archived_at,omitempty"`
+	DeletedAt                   *time.Time `json:"deleted_at,omitempty"`
+	CreatedAt                   time.Time  `json:"created_at"`
+	UpdatedAt                   time.Time  `json:"updated_at"`
 }
 
 type Message struct {
@@ -133,4 +142,17 @@ type UpdateConversationInput struct {
 	Title   string  `json:"title,omitempty"`
 	Archive *bool   `json:"archive,omitempty"`
 	Summary *string `json:"summary,omitempty"`
+}
+
+type SummaryUpdate struct {
+	Summary              string
+	Status               string
+	Error                string
+	SourceStartMessageID string
+	SourceEndMessageID   string
+	ProviderID           string
+	Model                string
+	GeneratedAt          *time.Time
+	EstimatedInputTokens int
+	IncrementVersion     bool
 }

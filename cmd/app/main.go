@@ -103,7 +103,8 @@ func run(args []string) error {
 		return err
 	}
 	chatRepo := chat.NewSQLRepository(store)
-	chatService := chat.NewService(cfg, chatRepo, providerService, providerClient, agentService, memoryService).WithToolProvider(mcpService)
+	chatService := chat.NewService(cfg, chatRepo, providerService, providerClient, agentService, memoryService).WithToolProvider(mcpService).WithSummaryEnqueuer(taskService)
+	taskService.WithConversationSummaryHandler(chatService)
 	if err := chatService.CleanupInterruptedRuns(ctx); err != nil {
 		return err
 	}

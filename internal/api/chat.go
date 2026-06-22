@@ -28,6 +28,8 @@ func (h *chatHandler) Routes(r chi.Router) {
 		r.Delete("/", h.deleteConversation)
 		r.Get("/messages", h.listMessages)
 		r.Post("/runs", h.run)
+		r.Post("/summary/regenerate", h.regenerateSummary)
+		r.Delete("/summary", h.clearSummary)
 	})
 	r.Post("/chat-runs/{runID}/cancel", h.cancelRun)
 	r.Post("/messages/{messageID}/regenerate", h.regenerate)
@@ -84,6 +86,24 @@ func (h *chatHandler) deleteConversation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *chatHandler) regenerateSummary(w http.ResponseWriter, r *http.Request) {
+	conversation, queued, err := h.service.QueueSummary(r.Context(), chatPrincipal(r), chi.URLParam(r, "conversationID"))
+	if err != nil {
+		h.writeChatError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"conversation": conversation, "queued": queued})
+}
+
+func (h *chatHandler) clearSummary(w http.ResponseWriter, r *http.Request) {
+	conversation, err := h.service.ClearSummary(r.Context(), chatPrincipal(r), chi.URLParam(r, "conversationID"))
+	if err != nil {
+		h.writeChatError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conversation": conversation})
 }
 
 func (h *chatHandler) listMessages(w http.ResponseWriter, r *http.Request) {

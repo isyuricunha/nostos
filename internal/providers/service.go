@@ -140,6 +140,28 @@ func (s *Service) ResolveForChat(ctx context.Context, workspaceID string, provid
 	return provider, apiKey, nil
 }
 
+func (s *Service) ResolveDefaultForChat(ctx context.Context, workspaceID string) (Provider, string, error) {
+	items, err := s.repo.List(ctx, workspaceID)
+	if err != nil {
+		return Provider{}, "", err
+	}
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		provider, secret, err := s.repo.Get(ctx, workspaceID, item.ID)
+		if err != nil {
+			return Provider{}, "", err
+		}
+		apiKey, err := s.resolveAPIKey(secret)
+		if err != nil {
+			continue
+		}
+		return provider, apiKey, nil
+	}
+	return Provider{}, "", ErrNotFound
+}
+
 func (s *Service) normalizeInput(workspaceID string, input ProviderInput, requireSecret bool) (Provider, ProviderSecret, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" || len(name) > 120 {
