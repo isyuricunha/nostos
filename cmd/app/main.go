@@ -22,6 +22,7 @@ import (
 	"github.com/yuricunha/nostos/internal/mcp"
 	"github.com/yuricunha/nostos/internal/memory"
 	"github.com/yuricunha/nostos/internal/providers"
+	"github.com/yuricunha/nostos/internal/tasks"
 	"github.com/yuricunha/nostos/internal/worker"
 )
 
@@ -76,6 +77,11 @@ func run(args []string) error {
 	}
 	authRepo := auth.NewSQLRepository(store)
 	authService := auth.NewService(authRepo, cfg)
+	if bootstrapped, err := authService.BootstrapOwner(ctx); err != nil {
+		return err
+	} else if bootstrapped {
+		logger.Info("bootstrap owner created", "email", cfg.Security.BootstrapEmail)
+	}
 	providerRepo := providers.NewSQLRepository(store)
 	providerClient := providers.NewOpenAIClient()
 	providerService := providers.NewService(cfg, providerRepo, authRepo, providerClient)
@@ -85,15 +91,14 @@ func run(args []string) error {
 	}
 	memoryService := memory.NewService(memory.NewSQLRepository(store))
 	mcpService := mcp.NewService(cfg, mcp.NewSQLRepository(store), authRepo, mcp.NewClient())
+	taskService := tasks.NewService(cfg, tasks.NewSQLRepository(store), authRepo).WithProviderClient(providerService, providerClient)
+	if err := taskService.EnsureSystemTasks(ctx); err != nil {
+		return err
+	}
 	chatRepo := chat.NewSQLRepository(store)
 	chatService := chat.NewService(cfg, chatRepo, providerService, providerClient, agentService, memoryService)
 	if err := chatService.CleanupInterruptedRuns(ctx); err != nil {
 		return err
-	}
-	if bootstrapped, err := authService.BootstrapOwner(ctx); err != nil {
-		return err
-	} else if bootstrapped {
-		logger.Info("bootstrap owner created", "email", cfg.Security.BootstrapEmail)
 	}
 
 	switch command {
@@ -101,9 +106,9 @@ func run(args []string) error {
 		logger.Info("migrations applied", "driver", cfg.Database.Driver)
 		return nil
 	case "worker":
-		return runWorker(ctx, cfg, logger, store)
+		return runWorker(ctx, cfg, logger, store, taskService)
 	case "server":
-		return runServer(ctx, cfg, logger, store, authService, providerService, chatService, agentService, memoryService, mcpService)
+		return runServer(ctx, cfg, logger, store, authService, providerService, chatService, agentService, memoryService, mcpService, taskService)
 	default:
 		return nil
 	}
@@ -120,6 +125,7 @@ func runServer(
 	agentService *agents.Service,
 	memoryService *memory.Service,
 	mcpService *mcp.Service,
+	taskService *tasks.Service,
 ) error {
 	healthService := health.NewService(store, version, buildCommit, buildTimestamp)
 	handler := api.NewRouter(api.RouterDeps{
@@ -135,6 +141,7 @@ func runServer(
 		Agents:    agentService,
 		Memories:  memoryService,
 		MCP:       mcpService,
+		Tasks:     taskService,
 	})
 
 	server := &http.Server{
@@ -166,11 +173,12 @@ func runServer(
 	}
 }
 
-func runWorker(ctx context.Context, cfg config.Config, logger *slog.Logger, store *database.Store) error {
+func runWorker(ctx context.Context, cfg config.Config, logger *slog.Logger, store *database.Store, taskService *tasks.Service) error {
 	runner := worker.NewRunner(worker.RunnerDeps{
 		Config: cfg,
 		Logger: logger,
 		Store:  store,
+		Tasks:  taskService,
 	})
 	return runner.Run(ctx)
 }

@@ -25,26 +25,7 @@ func (s *Service) EnsureDefaultAgents(ctx context.Context) error {
 		return err
 	}
 	for _, workspaceID := range workspaces {
-		hasDefault, err := s.repo.HasDefault(ctx, workspaceID)
-		if err != nil {
-			return err
-		}
-		if hasDefault {
-			continue
-		}
-		_, err = s.repo.Create(ctx, Agent{
-			WorkspaceID:           workspaceID,
-			Name:                  DefaultAgentName,
-			Description:           "Balanced assistant for general workspace tasks.",
-			Avatar:                "sparkles",
-			SystemPrompt:          "You are a concise, careful assistant in a private self-hosted AI workspace. Follow the user's instructions, use provided memories transparently, and avoid inventing facts.",
-			Temperature:           0.7,
-			MaxToolIterations:     8,
-			MemoryAccessMode:      "pinned_only",
-			ToolPermissionDefault: "ask",
-			Active:                true,
-		})
-		if err != nil {
+		if err := s.ensureDefaultAgent(ctx, workspaceID); err != nil {
 			return err
 		}
 	}
@@ -52,6 +33,9 @@ func (s *Service) EnsureDefaultAgents(ctx context.Context) error {
 }
 
 func (s *Service) List(ctx context.Context, principal PrincipalContext) ([]Agent, error) {
+	if err := s.ensureDefaultAgent(ctx, principal.WorkspaceID); err != nil {
+		return nil, err
+	}
 	return s.repo.List(ctx, principal.WorkspaceID)
 }
 
@@ -106,6 +90,32 @@ func (s *Service) GetChatAgent(ctx context.Context, workspaceID string, agentID 
 		FallbackModel:     agent.FallbackModel,
 		MemoryAccessMode:  agent.MemoryAccessMode,
 	}, nil
+}
+
+func (s *Service) ensureDefaultAgent(ctx context.Context, workspaceID string) error {
+	if strings.TrimSpace(workspaceID) == "" {
+		return nil
+	}
+	hasDefault, err := s.repo.HasDefault(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if hasDefault {
+		return nil
+	}
+	_, err = s.repo.Create(ctx, Agent{
+		WorkspaceID:           workspaceID,
+		Name:                  DefaultAgentName,
+		Description:           "Balanced assistant for general workspace tasks.",
+		Avatar:                "sparkles",
+		SystemPrompt:          "You are a concise, careful assistant in a private self-hosted AI workspace. Follow the user's instructions, use provided memories transparently, and avoid inventing facts.",
+		Temperature:           0.7,
+		MaxToolIterations:     8,
+		MemoryAccessMode:      "pinned_only",
+		ToolPermissionDefault: "ask",
+		Active:                true,
+	})
+	return err
 }
 
 func normalizeInput(workspaceID string, input AgentInput) (Agent, error) {

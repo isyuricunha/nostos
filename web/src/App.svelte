@@ -111,6 +111,60 @@
     permission_mode: string;
   };
 
+  type Task = {
+    id: string;
+    name: string;
+    description: string;
+    task_type: string;
+    state: string;
+    system_managed: boolean;
+    provider_id?: string;
+    model?: string;
+    prompt: string;
+    tool_policy: string;
+    max_retries: number;
+    timeout_ms: number;
+    concurrency_policy: string;
+  };
+
+  type TaskSchedule = {
+    id: string;
+    task_id: string;
+    mode: string;
+    cron_expression?: string;
+    interval_seconds?: number;
+    run_at?: string;
+    timezone: string;
+    enabled: boolean;
+    next_run_at?: string;
+  };
+
+  type TaskRecord = {
+    task: Task;
+    schedule: TaskSchedule;
+  };
+
+  type TaskRun = {
+    id: string;
+    task_id: string;
+    state: string;
+    attempt: number;
+    max_retries: number;
+    queued_at: string;
+    started_at?: string;
+    completed_at?: string;
+    result?: string;
+    error_message?: string;
+  };
+
+  type TaskRunEvent = {
+    id: string;
+    task_run_id: string;
+    level: string;
+    message: string;
+    created_at: string;
+  };
+
   type ReadyStatus = {
     ready: boolean;
     version: string;
@@ -186,6 +240,28 @@
     tools: MCPTool[];
   };
 
+  type TasksResponse = {
+    tasks: TaskRecord[];
+  };
+
+  type TaskResponse = {
+    task: Task;
+    schedule: TaskSchedule;
+  };
+
+  type TaskRunsResponse = {
+    runs: TaskRun[];
+  };
+
+  type TaskRunResponse = {
+    run: TaskRun;
+  };
+
+  type TaskRunRecordResponse = {
+    run: TaskRun;
+    events: TaskRunEvent[];
+  };
+
   const navItems = [
     strings.nav.chat,
     strings.nav.agents,
@@ -208,6 +284,9 @@
   let memories: Memory[] = [];
   let mcpServers: MCPServer[] = [];
   let mcpTools: MCPTool[] = [];
+  let taskRecords: TaskRecord[] = [];
+  let taskRuns: TaskRun[] = [];
+  let taskRunEvents: TaskRunEvent[] = [];
   let runMemories: MemorySnippet[] = [];
   let selectedConversationId = '';
   let selectedAgentId = '';
@@ -245,6 +324,15 @@
   let mcpCommand = '';
   let mcpArguments = '';
   let mcpAuthorization = '';
+  let taskName = '';
+  let taskPrompt = '';
+  let taskType = 'agent';
+  let taskState = 'enabled';
+  let taskScheduleMode = 'manual';
+  let taskCronExpression = '';
+  let taskIntervalSeconds = 3600;
+  let taskRunAt = '';
+  let taskToolPolicy = 'use_preapproved_tools_only';
 
   onMount(async () => {
     await refreshAppState();
@@ -295,6 +383,7 @@
       refreshAgents(),
       refreshMemories(),
       refreshMCP(),
+      refreshTasks(),
       refreshConversations()
     ]);
   }
@@ -697,6 +786,78 @@
     await refreshMCP();
   }
 
+  async function refreshTasks(): Promise<void> {
+    const [tasksResponse, runsResponse] = await Promise.all([
+      getJSON<TasksResponse>('/api/v1/tasks'),
+      getJSON<TaskRunsResponse>('/api/v1/task-runs')
+    ]);
+    taskRecords = tasksResponse.tasks;
+    taskRuns = runsResponse.runs;
+  }
+
+  async function createTask(): Promise<void> {
+    submitting = true;
+    errorMessage = '';
+    notice = '';
+    try {
+      const response = await postJSON<TaskResponse>('/api/v1/tasks', {
+        name: taskName,
+        description: '',
+        task_type: taskType,
+        state: taskState,
+        provider_id: taskType === 'agent' ? selectedProviderId : '',
+        model: taskType === 'agent' ? selectedModel : '',
+        prompt: taskPrompt,
+        tool_policy: taskToolPolicy,
+        max_retries: 3,
+        timeout_ms: 600000,
+        concurrency_policy: 'skip',
+        schedule_mode: taskScheduleMode,
+        cron_expression: taskScheduleMode === 'cron' ? taskCronExpression : '',
+        interval_seconds: taskScheduleMode === 'interval' ? taskIntervalSeconds : 0,
+        run_at: taskScheduleMode === 'one_time' ? taskRunAt : '',
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      });
+      taskRecords = [{ task: response.task, schedule: response.schedule }, ...taskRecords];
+      taskName = '';
+      taskPrompt = '';
+      taskCronExpression = '';
+      taskRunAt = '';
+      notice = 'Task saved.';
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function runTask(taskId: string): Promise<void> {
+    const response = await postJSON<TaskRunResponse>(`/api/v1/tasks/${taskId}/run`);
+    taskRuns = [response.run, ...taskRuns];
+    notice = 'Task queued.';
+  }
+
+  async function cancelTaskRun(runId: string): Promise<void> {
+    await postJSON<{ ok: boolean }>(`/api/v1/task-runs/${runId}/cancel`);
+    await refreshTasks();
+    notice = 'Task run cancelled.';
+  }
+
+  async function retryTaskRun(runId: string): Promise<void> {
+    const response = await postJSON<TaskRunResponse>(`/api/v1/task-runs/${runId}/retry`);
+    taskRuns = [response.run, ...taskRuns];
+    notice = 'Task retry queued.';
+  }
+
+  async function showTaskRunEvents(runId: string): Promise<void> {
+    const response = await getJSON<TaskRunRecordResponse>(`/api/v1/task-runs/${runId}`);
+    taskRunEvents = response.events;
+  }
+
+  function taskNameForRun(run: TaskRun): string {
+    return taskRecords.find((record) => record.task.id === run.task_id)?.task.name ?? run.task_id;
+  }
+
   function messageFromError(error: unknown): string {
     return error instanceof Error ? error.message : 'The request failed.';
   }
@@ -1051,6 +1212,140 @@
                         <button on:click={() => deleteMemory(memory.id)} type="button">{strings.memories.delete}</button>
                       </div>
                     </article>
+                  {/each}
+                </div>
+              {/if}
+            </section>
+          </section>
+        {:else if activeView === strings.nav.tasks}
+          <section class="providers-layout">
+            <form class="panel" on:submit|preventDefault={createTask}>
+              <h2>{strings.tasks.add}</h2>
+              <label>
+                Name
+                <input bind:value={taskName} required />
+              </label>
+              <label>
+                Type
+                <select bind:value={taskType}>
+                  <option value="agent">agent</option>
+                  <option value="system">system</option>
+                </select>
+              </label>
+              <label>
+                State
+                <select bind:value={taskState}>
+                  <option value="draft">draft</option>
+                  <option value="enabled">enabled</option>
+                  <option value="disabled">disabled</option>
+                </select>
+              </label>
+              <label>
+                Prompt
+                <textarea bind:value={taskPrompt} required></textarea>
+              </label>
+              <label>
+                Schedule
+                <select bind:value={taskScheduleMode}>
+                  <option value="manual">manual</option>
+                  <option value="one_time">one_time</option>
+                  <option value="cron">cron</option>
+                  <option value="interval">interval</option>
+                </select>
+              </label>
+              {#if taskScheduleMode === 'cron'}
+                <label>
+                  Cron expression
+                  <input bind:value={taskCronExpression} placeholder="0 * * * *" required />
+                </label>
+              {:else if taskScheduleMode === 'interval'}
+                <label>
+                  Interval seconds
+                  <input bind:value={taskIntervalSeconds} min="1" type="number" />
+                </label>
+              {:else if taskScheduleMode === 'one_time'}
+                <label>
+                  Run at
+                  <input bind:value={taskRunAt} placeholder="2026-06-22T12:00:00Z" required />
+                </label>
+              {/if}
+              <label>
+                Tool policy
+                <select bind:value={taskToolPolicy}>
+                  <option value="use_preapproved_tools_only">use_preapproved_tools_only</option>
+                  <option value="fail_if_approval_required">fail_if_approval_required</option>
+                </select>
+              </label>
+              <button disabled={submitting} type="submit">{strings.tasks.add}</button>
+            </form>
+            <section class="panel">
+              <div class="panel-heading">
+                <h2>Tasks</h2>
+                <button on:click={refreshTasks} type="button">Refresh</button>
+              </div>
+              {#if taskRecords.length === 0}
+                <p>{strings.tasks.noTasks}</p>
+              {:else}
+                <div class="table-list">
+                  {#each taskRecords as record (record.task.id)}
+                    <article>
+                      <div>
+                        <strong>{record.task.name}</strong>
+                        <span>
+                          {record.task.task_type} / {record.task.state}
+                          {record.task.system_managed ? ' / system-managed' : ''}
+                        </span>
+                        <span>
+                          {record.schedule.mode}
+                          {record.schedule.next_run_at
+                            ? ` / next ${new Date(record.schedule.next_run_at).toLocaleString()}`
+                            : ''}
+                        </span>
+                      </div>
+                      <div>
+                        <button on:click={() => runTask(record.task.id)} type="button">{strings.tasks.runNow}</button>
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+              {/if}
+              <div class="panel-heading nested-heading">
+                <h2>Runs</h2>
+              </div>
+              {#if taskRuns.length === 0}
+                <p>{strings.tasks.noRuns}</p>
+              {:else}
+                <div class="table-list">
+                  {#each taskRuns as run (run.id)}
+                    <article>
+                      <div>
+                        <strong>{taskNameForRun(run)}</strong>
+                        <span>{run.state} / attempt {run.attempt + 1} of {run.max_retries + 1}</span>
+                        <span>Queued {new Date(run.queued_at).toLocaleString()}</span>
+                        {#if run.result}
+                          <span>{run.result}</span>
+                        {/if}
+                        {#if run.error_message}
+                          <span>{run.error_message}</span>
+                        {/if}
+                      </div>
+                      <div>
+                        <button on:click={() => showTaskRunEvents(run.id)} type="button">{strings.tasks.events}</button>
+                        {#if run.state === 'queued' || run.state === 'running' || run.state === 'waiting'}
+                          <button on:click={() => cancelTaskRun(run.id)} type="button">{strings.tasks.cancel}</button>
+                        {/if}
+                        {#if run.state === 'failed' || run.state === 'timed_out' || run.state === 'cancelled'}
+                          <button on:click={() => retryTaskRun(run.id)} type="button">{strings.tasks.retry}</button>
+                        {/if}
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+              {/if}
+              {#if taskRunEvents.length > 0}
+                <div class="event-log">
+                  {#each taskRunEvents as event (event.id)}
+                    <p><strong>{event.level}</strong> {new Date(event.created_at).toLocaleString()} - {event.message}</p>
                   {/each}
                 </div>
               {/if}

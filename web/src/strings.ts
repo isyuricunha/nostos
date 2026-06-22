@@ -61,6 +61,15 @@ export const strings = {
     pin: 'Pin',
     delete: 'Delete'
   },
+  tasks: {
+    add: 'Add task',
+    noTasks: 'No tasks configured yet.',
+    noRuns: 'No task runs yet.',
+    runNow: 'Run now',
+    cancel: 'Cancel',
+    retry: 'Retry',
+    events: 'Run events'
+  },
   mcp: {
     add: 'Add MCP server',
     discover: 'Discover tools',

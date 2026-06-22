@@ -23,6 +23,7 @@ import (
 	"github.com/yuricunha/nostos/internal/mcp"
 	"github.com/yuricunha/nostos/internal/memory"
 	"github.com/yuricunha/nostos/internal/providers"
+	"github.com/yuricunha/nostos/internal/tasks"
 )
 
 type RouterDeps struct {
@@ -35,6 +36,7 @@ type RouterDeps struct {
 	Agents    *agents.Service
 	Memories  *memory.Service
 	MCP       *mcp.Service
+	Tasks     *tasks.Service
 }
 
 type APIError struct {
@@ -74,7 +76,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 		if deps.Auth.Auth != nil {
 			newAuthHandler(deps.Auth).Routes(r)
 		}
-		if deps.Auth.Auth != nil && (deps.Providers != nil || deps.Chat != nil || deps.Agents != nil || deps.Memories != nil || deps.MCP != nil) {
+		if deps.Auth.Auth != nil && (deps.Providers != nil || deps.Chat != nil || deps.Agents != nil || deps.Memories != nil || deps.MCP != nil || deps.Tasks != nil) {
 			r.Group(func(r chi.Router) {
 				authHandler := newAuthHandler(deps.Auth)
 				r.Use(authHandler.requireAuth)
@@ -93,6 +95,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 				}
 				if deps.MCP != nil {
 					newMCPHandler(deps.MCP).Routes(r)
+				}
+				if deps.Tasks != nil {
+					newTasksHandler(deps.Tasks).Routes(r)
 				}
 			})
 		}
