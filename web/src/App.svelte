@@ -149,15 +149,23 @@
   let mcpCommand = '';
   let mcpArguments = '';
   let mcpAuthorization = '';
+  let editingTaskId = '';
   let taskName = '';
+  let taskDescription = '';
   let taskPrompt = '';
   let taskType = 'agent';
   let taskState = 'enabled';
+  let taskAgentId = '';
+  let taskProviderId = '';
+  let taskModel = '';
   let taskScheduleMode = 'manual';
   let taskCronExpression = '';
   let taskIntervalSeconds = 3600;
   let taskRunAt = '';
   let taskToolPolicy = 'use_preapproved_tools_only';
+  let taskMaxRetries = 3;
+  let taskTimeoutMS = 600000;
+  let taskConcurrencyPolicy = 'skip';
   let negativeFeedbackReason = 'Incorrect information';
   let replyPresetName = '';
   let replyPresetInstruction = '';
@@ -820,35 +828,92 @@
     errorMessage = '';
     notice = '';
     try {
-      const response = await postJSON<TaskResponse>('/api/v1/tasks', {
+      const payload = {
         name: taskName,
-        description: '',
+        description: taskDescription,
         task_type: taskType,
         state: taskState,
-        provider_id: taskType === 'agent' ? selectedProviderId : '',
-        model: taskType === 'agent' ? selectedModel : '',
+        agent_id: taskType === 'agent' ? taskAgentId : '',
+        provider_id: taskType === 'agent' ? taskProviderId : '',
+        model: taskType === 'agent' ? taskModel : '',
         prompt: taskPrompt,
         tool_policy: taskToolPolicy,
-        max_retries: 3,
-        timeout_ms: 600000,
-        concurrency_policy: 'skip',
+        max_retries: taskMaxRetries,
+        timeout_ms: taskTimeoutMS,
+        concurrency_policy: taskConcurrencyPolicy,
         schedule_mode: taskScheduleMode,
         cron_expression: taskScheduleMode === 'cron' ? taskCronExpression : '',
         interval_seconds: taskScheduleMode === 'interval' ? taskIntervalSeconds : 0,
         run_at: taskScheduleMode === 'one_time' ? taskRunAt : '',
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-      });
-      taskRecords = [{ task: response.task, schedule: response.schedule }, ...taskRecords];
-      taskName = '';
-      taskPrompt = '';
-      taskCronExpression = '';
-      taskRunAt = '';
-      notice = 'Task saved.';
+      };
+      const taskBeingEdited = editingTaskId;
+      const response = taskBeingEdited
+        ? await putJSON<TaskResponse>(`/api/v1/tasks/${taskBeingEdited}`, payload)
+        : await postJSON<TaskResponse>('/api/v1/tasks', payload);
+      const record = { task: response.task, schedule: response.schedule };
+      taskRecords = taskBeingEdited
+        ? taskRecords.map((item) => (item.task.id === response.task.id ? record : item))
+        : [record, ...taskRecords];
+      resetTaskForm();
+      notice = taskBeingEdited ? 'Task updated.' : 'Task saved.';
     } catch (error) {
       errorMessage = messageFromError(error);
     } finally {
       submitting = false;
     }
+  }
+
+  function editTask(record: TaskRecord): void {
+    editingTaskId = record.task.id;
+    taskName = record.task.name;
+    taskDescription = record.task.description;
+    taskPrompt = record.task.prompt;
+    taskType = record.task.task_type;
+    taskState = record.task.state;
+    taskAgentId = record.task.agent_id ?? '';
+    taskProviderId = record.task.provider_id ?? '';
+    taskModel = record.task.model ?? '';
+    taskScheduleMode = record.schedule.mode;
+    taskCronExpression = record.schedule.cron_expression ?? '';
+    taskIntervalSeconds = record.schedule.interval_seconds ?? 3600;
+    taskRunAt = record.schedule.run_at ?? '';
+    taskToolPolicy = record.task.tool_policy;
+    taskMaxRetries = record.task.max_retries;
+    taskTimeoutMS = record.task.timeout_ms;
+    taskConcurrencyPolicy = record.task.concurrency_policy;
+  }
+
+  function resetTaskForm(): void {
+    editingTaskId = '';
+    taskName = '';
+    taskDescription = '';
+    taskPrompt = '';
+    taskType = 'agent';
+    taskState = 'enabled';
+    taskAgentId = '';
+    taskProviderId = '';
+    taskModel = '';
+    taskScheduleMode = 'manual';
+    taskCronExpression = '';
+    taskIntervalSeconds = 3600;
+    taskRunAt = '';
+    taskToolPolicy = 'use_preapproved_tools_only';
+    taskMaxRetries = 3;
+    taskTimeoutMS = 600000;
+    taskConcurrencyPolicy = 'skip';
+  }
+
+  async function deleteTask(taskId: string): Promise<void> {
+    if (!confirm('Delete this task and its schedules? Existing run history will be removed.')) {
+      return;
+    }
+    await deleteJSON<{ ok: boolean }>(`/api/v1/tasks/${taskId}`);
+    if (editingTaskId === taskId) {
+      resetTaskForm();
+    }
+    await refreshTasks();
+    notice = 'Task deleted.';
   }
 
   async function runTask(taskId: string): Promise<void> {
@@ -1576,10 +1641,19 @@
         {:else if activeView === strings.nav.tasks}
           <section class="providers-layout">
             <form class="panel" on:submit|preventDefault={createTask}>
-              <h2>{strings.tasks.add}</h2>
+              <div class="panel-heading">
+                <h2>{editingTaskId ? 'Edit task' : strings.tasks.add}</h2>
+                {#if editingTaskId}
+                  <button on:click={resetTaskForm} type="button">Cancel edit</button>
+                {/if}
+              </div>
               <label>
                 Name
                 <input bind:value={taskName} required />
+              </label>
+              <label>
+                Description
+                <input bind:value={taskDescription} />
               </label>
               <label>
                 Type
@@ -1596,6 +1670,30 @@
                   <option value="disabled">disabled</option>
                 </select>
               </label>
+              {#if taskType === 'agent'}
+                <label>
+                  Agent
+                  <select bind:value={taskAgentId}>
+                    <option value="">Task default agent behavior</option>
+                    {#each agents as agent (agent.id)}
+                      <option value={agent.id}>{agent.name}</option>
+                    {/each}
+                  </select>
+                </label>
+                <label>
+                  Provider override
+                  <select bind:value={taskProviderId}>
+                    <option value="">Agent/default provider</option>
+                    {#each providers as provider (provider.id)}
+                      <option value={provider.id}>{provider.name}</option>
+                    {/each}
+                  </select>
+                </label>
+                <label>
+                  Model override
+                  <input bind:value={taskModel} />
+                </label>
+              {/if}
               <label>
                 Prompt
                 <textarea bind:value={taskPrompt} required></textarea>
@@ -1632,7 +1730,23 @@
                   <option value="fail_if_approval_required">fail_if_approval_required</option>
                 </select>
               </label>
-              <button disabled={submitting} type="submit">{strings.tasks.add}</button>
+              <label>
+                Maximum retries
+                <input bind:value={taskMaxRetries} min="0" max="20" type="number" />
+              </label>
+              <label>
+                Timeout, milliseconds
+                <input bind:value={taskTimeoutMS} min="1000" type="number" />
+              </label>
+              <label>
+                Concurrency policy
+                <select bind:value={taskConcurrencyPolicy}>
+                  <option value="allow">allow</option>
+                  <option value="skip">skip</option>
+                  <option value="replace">replace</option>
+                </select>
+              </label>
+              <button disabled={submitting} type="submit">{editingTaskId ? 'Save task' : strings.tasks.add}</button>
             </form>
             <section class="panel">
               <div class="panel-heading">
@@ -1657,9 +1771,24 @@
                             ? ` / next ${new Date(record.schedule.next_run_at).toLocaleString()}`
                             : ''}
                         </span>
+                        <span>
+                          retries {record.task.max_retries} / timeout {Math.round(record.task.timeout_ms / 1000)}s /
+                          concurrency {record.task.concurrency_policy}
+                        </span>
+                        {#if record.task.agent_id || record.task.provider_id || record.task.model}
+                          <span>
+                            {record.task.agent_id ? 'agent configured' : ''}
+                            {record.task.provider_id ? ' / provider override' : ''}
+                            {record.task.model ? ` / ${record.task.model}` : ''}
+                          </span>
+                        {/if}
                       </div>
                       <div>
+                        <button on:click={() => editTask(record)} type="button">Edit</button>
                         <button on:click={() => runTask(record.task.id)} type="button">{strings.tasks.runNow}</button>
+                        {#if !record.task.system_managed}
+                          <button on:click={() => deleteTask(record.task.id)} type="button">Delete</button>
+                        {/if}
                       </div>
                     </article>
                   {/each}

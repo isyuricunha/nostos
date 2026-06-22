@@ -146,6 +146,7 @@ export type Task = {
   task_type: string;
   state: string;
   system_managed: boolean;
+  agent_id?: string;
   provider_id?: string;
   model?: string;
   prompt: string;
