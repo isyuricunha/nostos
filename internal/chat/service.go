@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,7 +12,10 @@ import (
 	"github.com/isyuricunha/nostos/internal/providers"
 )
 
-var ErrInvalidInput = errors.New("invalid chat input")
+var (
+	ErrInvalidInput     = errors.New("invalid chat input")
+	ErrApprovalRequired = errors.New("tool approval is required")
+)
 
 type ProviderResolver interface {
 	ResolveForChat(ctx context.Context, workspaceID string, providerID string) (providers.Provider, string, error)
@@ -25,11 +29,14 @@ type AgentResolver interface {
 type MemoryProvider interface {
 	SelectForRun(ctx context.Context, request MemoryRequest) ([]MemorySnippet, error)
 	RecordRunMemories(ctx context.Context, runID string, memories []MemorySnippet) error
+	UsedByRun(ctx context.Context, runID string) ([]MemorySnippet, error)
 }
 
 type ToolProvider interface {
-	AllowedChatTools(ctx context.Context, workspaceID string) ([]providers.ChatTool, error)
-	ExecuteAllowedTool(ctx context.Context, workspaceID string, name string, arguments string) (string, error)
+	RuntimeTools(ctx context.Context, request ToolExposureRequest) ([]RuntimeTool, error)
+	ExecuteRuntimeTool(ctx context.Context, request ToolExecutionRequest) (ToolExecutionResult, error)
+	SetAgentToolPermission(ctx context.Context, workspaceID string, agentID string, toolID string, mode string) error
+	DisableTool(ctx context.Context, workspaceID string, toolID string) error
 }
 
 type SummaryEnqueuer interface {
@@ -220,94 +227,197 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 		}
 	}
 
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	events, err := s.client.StreamChat(streamCtx, providers.StreamRequest{
-		Provider: provider,
-		APIKey:   apiKey,
-		Model:    model,
-		Messages: promptMessages,
-		Tools:    s.allowedTools(ctx, principal.WorkspaceID),
-	})
+	runtimeTools, err := s.runtimeTools(ctx, principal, conversation, agent)
 	if err != nil {
-		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_unavailable", err.Error(), true)
-		_ = sink("run_failed", map[string]any{"run_id": run.ID, "message": err.Error()})
+		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "tool_resolution_failed", err.Error(), true)
 		return err
 	}
-
-	var contentBuilder strings.Builder
-	var usage UsageValues
-	var toolCalls []providers.ToolCall
-	toolReady := false
-	for event := range events {
-		cancelled, err := s.repo.CancellationRequested(ctx, run.ID)
-		if err != nil {
-			return err
-		}
-		if cancelled {
-			cancel()
-			_ = s.repo.UpdateRunState(ctx, run.ID, RunCancelled, "", "", true)
-			_ = sink("run_cancelled", map[string]any{"run_id": run.ID})
-			return nil
-		}
-		if event.Error != nil {
-			_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_stream_failed", event.Error.Error(), true)
-			_ = sink("run_failed", map[string]any{"run_id": run.ID, "message": event.Error.Error()})
-			return event.Error
-		}
-		switch event.Type {
-		case "content_delta":
-			contentBuilder.WriteString(event.Content)
-			_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), usage)
-			if err := sink("content_delta", map[string]string{"delta": event.Content}); err != nil {
-				return err
-			}
-		case "reasoning_delta":
-			if err := sink("reasoning_delta", map[string]string{"delta": event.Reasoning}); err != nil {
-				return err
-			}
-		case "tool_call_delta":
-			if event.ToolCall != nil {
-				toolCalls = mergeToolCall(toolCalls, *event.ToolCall)
-			}
-			if err := sink(event.Type, event.ToolCall); err != nil {
-				return err
-			}
-		case "tool_call_ready":
-			toolReady = true
-			_ = s.repo.UpdateRunState(ctx, run.ID, RunWaitingForApproval, "", "", false)
-			if err := sink(event.Type, map[string]any{"run_id": run.ID, "tool_calls": toolCalls}); err != nil {
-				return err
-			}
-		case "usage":
-			if event.Usage != nil {
-				usage = UsageValues{PromptTokens: event.Usage.PromptTokens, CompletionTokens: event.Usage.CompletionTokens, TotalTokens: event.Usage.TotalTokens}
-				_ = s.repo.UpdateRunUsage(ctx, run.ID, usage)
-				_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), usage)
-				if err := sink("usage", usage); err != nil {
-					return err
-				}
-			}
-		case "run_completed":
-			if toolReady {
-				break
-			}
-			_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), usage)
-			_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
-			s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, "", sink)
-			return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
-		}
-	}
-	if toolReady {
-		return s.executeToolFollowup(ctx, principal, run.ID, assistantMessage.ID, provider, apiKey, model, conversation, agent, memories, "", promptMessages, toolCalls, sink)
-	}
-	_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
-	s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, "", sink)
-	return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
+	return s.executeModelLoop(ctx, modelLoopRequest{
+		Principal:          principal,
+		Conversation:       conversation,
+		Agent:              agent,
+		Run:                run,
+		AssistantMessageID: assistantMessage.ID,
+		Provider:           provider,
+		APIKey:             apiKey,
+		Model:              model,
+		Memories:           memories,
+		BranchID:           "",
+		Messages:           promptMessages,
+		Tools:              runtimeTools,
+	}, sink)
 }
 
 func (s *Service) CancelRun(ctx context.Context, principal PrincipalContext, runID string) error {
 	return s.repo.RequestCancellation(ctx, principal.WorkspaceID, principal.UserID, runID, time.Now().UTC())
+}
+
+func (s *Service) ListPendingToolApprovals(ctx context.Context, principal PrincipalContext) ([]ToolCallRecord, error) {
+	return s.repo.ListPendingToolApprovals(ctx, principal.WorkspaceID, principal.UserID)
+}
+
+func (s *Service) ApproveToolCall(ctx context.Context, principal PrincipalContext, toolCallID string, decision string) (ToolCallRecord, error) {
+	if decision == "" {
+		decision = ToolDecisionApproveOnce
+	}
+	if decision != ToolDecisionApproveOnce && decision != ToolDecisionApproveConversation && decision != ToolDecisionAllowAgent {
+		return ToolCallRecord{}, fmt.Errorf("%w: approval decision is invalid", ErrInvalidInput)
+	}
+	call, _, conversation, err := s.repo.GetToolCall(ctx, principal.WorkspaceID, principal.UserID, toolCallID)
+	if err != nil {
+		return ToolCallRecord{}, err
+	}
+	if call.State == ToolCallSucceeded {
+		return call, nil
+	}
+	if call.State != ToolCallWaitingForApproval && call.State != ToolCallApproved {
+		return ToolCallRecord{}, fmt.Errorf("%w: tool call is not waiting for approval", ErrInvalidInput)
+	}
+	agent, err := s.resolveAgent(ctx, conversation)
+	if err != nil {
+		return ToolCallRecord{}, err
+	}
+	if decision == ToolDecisionAllowAgent {
+		if s.tools == nil {
+			return ToolCallRecord{}, errors.New("tool provider is unavailable")
+		}
+		if err := s.tools.SetAgentToolPermission(ctx, principal.WorkspaceID, agent.ID, call.ToolID, ToolPermissionAllow); err != nil {
+			return ToolCallRecord{}, err
+		}
+	}
+	if _, err := s.repo.RecordToolApproval(ctx, ToolApprovalRecord{
+		WorkspaceID:    principal.WorkspaceID,
+		ToolCallID:     call.ID,
+		ToolID:         call.ToolID,
+		AgentID:        agent.ID,
+		ConversationID: conversation.ID,
+		ActorUserID:    principal.UserID,
+		Decision:       decision,
+	}); err != nil {
+		return ToolCallRecord{}, err
+	}
+	if err := s.repo.UpdateToolCallState(ctx, call.ID, ToolCallApproved, ToolApprovalApproved, "", ""); err != nil {
+		return ToolCallRecord{}, err
+	}
+	updated, _, _, err := s.repo.GetToolCall(ctx, principal.WorkspaceID, principal.UserID, toolCallID)
+	return updated, err
+}
+
+func (s *Service) DenyToolCall(ctx context.Context, principal PrincipalContext, toolCallID string, decision string) (ToolCallRecord, error) {
+	if decision == "" {
+		decision = ToolDecisionDeny
+	}
+	if decision != ToolDecisionDeny && decision != ToolDecisionDenyDisableTool {
+		return ToolCallRecord{}, fmt.Errorf("%w: denial decision is invalid", ErrInvalidInput)
+	}
+	call, _, conversation, err := s.repo.GetToolCall(ctx, principal.WorkspaceID, principal.UserID, toolCallID)
+	if err != nil {
+		return ToolCallRecord{}, err
+	}
+	if call.State != ToolCallWaitingForApproval && call.State != ToolCallApproved && call.State != ToolCallDenied {
+		return ToolCallRecord{}, fmt.Errorf("%w: tool call is not waiting for a decision", ErrInvalidInput)
+	}
+	agent, err := s.resolveAgent(ctx, conversation)
+	if err != nil {
+		return ToolCallRecord{}, err
+	}
+	if decision == ToolDecisionDenyDisableTool {
+		if s.tools == nil {
+			return ToolCallRecord{}, errors.New("tool provider is unavailable")
+		}
+		if err := s.tools.DisableTool(ctx, principal.WorkspaceID, call.ToolID); err != nil {
+			return ToolCallRecord{}, err
+		}
+	}
+	if _, err := s.repo.RecordToolApproval(ctx, ToolApprovalRecord{
+		WorkspaceID:    principal.WorkspaceID,
+		ToolCallID:     call.ID,
+		ToolID:         call.ToolID,
+		AgentID:        agent.ID,
+		ConversationID: conversation.ID,
+		ActorUserID:    principal.UserID,
+		Decision:       decision,
+	}); err != nil {
+		return ToolCallRecord{}, err
+	}
+	if err := s.repo.UpdateToolCallState(ctx, call.ID, ToolCallDenied, ToolApprovalDenied, "", "Tool call denied by the workspace owner."); err != nil {
+		return ToolCallRecord{}, err
+	}
+	updated, _, _, err := s.repo.GetToolCall(ctx, principal.WorkspaceID, principal.UserID, toolCallID)
+	return updated, err
+}
+
+func (s *Service) ResumeRun(ctx context.Context, principal PrincipalContext, runID string, sink StreamSink) error {
+	run, err := s.repo.GetRun(ctx, principal.WorkspaceID, principal.UserID, runID)
+	if err != nil {
+		return err
+	}
+	conversation, err := s.repo.GetConversation(ctx, principal.WorkspaceID, principal.UserID, run.ConversationID)
+	if err != nil {
+		return err
+	}
+	agent, err := s.resolveAgent(ctx, conversation)
+	if err != nil {
+		return err
+	}
+	if run.ProviderID == "" {
+		return fmt.Errorf("%w: run provider is missing", ErrInvalidInput)
+	}
+	provider, apiKey, err := s.providers.ResolveForChat(ctx, principal.WorkspaceID, run.ProviderID)
+	if err != nil {
+		return err
+	}
+	var memories []MemorySnippet
+	if s.memories != nil {
+		memories, err = s.memories.UsedByRun(ctx, run.ID)
+		if err != nil {
+			return err
+		}
+	}
+	promptMessages, err := s.contextMessages(ctx, principal, conversation, agent, memories, run.UserMessageID, "", run.BranchID)
+	if err != nil {
+		return err
+	}
+	toolCalls, err := s.repo.ListToolCallsForRun(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	for _, call := range toolCalls {
+		if call.State == ToolCallWaitingForApproval {
+			return ErrApprovalRequired
+		}
+	}
+	runtimeTools, err := s.runtimeTools(ctx, principal, conversation, agent)
+	if err != nil {
+		return err
+	}
+	request := modelLoopRequest{
+		Principal:          principal,
+		Conversation:       conversation,
+		Agent:              agent,
+		Run:                run,
+		AssistantMessageID: run.AssistantMessageID,
+		Provider:           provider,
+		APIKey:             apiKey,
+		Model:              run.Model,
+		Memories:           memories,
+		BranchID:           run.BranchID,
+		Messages:           promptMessages,
+		Tools:              runtimeTools,
+	}
+	messages := append([]providers.ChatMessage{}, promptMessages...)
+	for _, call := range toolCalls {
+		if call.State != ToolCallApproved && call.State != ToolCallDenied {
+			continue
+		}
+		toolMessage, err := s.executePersistedToolCall(ctx, request, call, sink)
+		if err != nil {
+			return err
+		}
+		messages = append(messages, toolMessage)
+	}
+	request.Messages = messages
+	return s.executeModelLoop(ctx, request, sink)
 }
 
 func (s *Service) Regenerate(ctx context.Context, principal PrincipalContext, assistantMessageID string, input RunInput, sink StreamSink) error {
@@ -441,34 +551,25 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 	if err != nil {
 		return err
 	}
-	events, err := s.client.StreamChat(ctx, providers.StreamRequest{
-		Provider: provider,
-		APIKey:   apiKey,
-		Model:    model,
-		Messages: promptMessages,
-	})
+	runtimeTools, err := s.runtimeTools(ctx, principal, conversation, agent)
 	if err != nil {
-		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_unavailable", err.Error(), true)
+		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "tool_resolution_failed", err.Error(), true)
 		return err
 	}
-	var contentBuilder strings.Builder
-	for event := range events {
-		if event.Type == "content_delta" {
-			contentBuilder.WriteString(event.Content)
-			_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), UsageValues{})
-			if err := sink("content_delta", map[string]string{"delta": event.Content}); err != nil {
-				return err
-			}
-		}
-		if event.Type == "run_completed" {
-			_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
-			s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, branch.ID, sink)
-			return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
-		}
-	}
-	_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
-	s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, branch.ID, sink)
-	return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
+	return s.executeModelLoop(ctx, modelLoopRequest{
+		Principal:          principal,
+		Conversation:       conversation,
+		Agent:              agent,
+		Run:                run,
+		AssistantMessageID: assistantMessage.ID,
+		Provider:           provider,
+		APIKey:             apiKey,
+		Model:              model,
+		Memories:           memories,
+		BranchID:           branch.ID,
+		Messages:           promptMessages,
+		Tools:              runtimeTools,
+	}, sink)
 }
 
 func (s *Service) CleanupInterruptedRuns(ctx context.Context) error {
@@ -492,17 +593,6 @@ func (s *Service) RecalculateConversationTitles(ctx context.Context, limit int) 
 	return fmt.Sprintf("conversation titles recalculated=%d", count), nil
 }
 
-func (s *Service) allowedTools(ctx context.Context, workspaceID string) []providers.ChatTool {
-	if s.tools == nil {
-		return nil
-	}
-	tools, err := s.tools.AllowedChatTools(ctx, workspaceID)
-	if err != nil {
-		return nil
-	}
-	return tools
-}
-
 func mergeToolCall(calls []providers.ToolCall, next providers.ToolCall) []providers.ToolCall {
 	if next.ID == "" {
 		next.ID = next.Function.Name
@@ -522,71 +612,127 @@ func mergeToolCall(calls []providers.ToolCall, next providers.ToolCall) []provid
 	return append(calls, next)
 }
 
-func (s *Service) executeToolFollowup(
-	ctx context.Context,
-	principal PrincipalContext,
-	runID string,
-	assistantMessageID string,
-	provider providers.Provider,
-	apiKey string,
-	model string,
-	conversation Conversation,
-	agent AgentContext,
-	memories []MemorySnippet,
-	branchID string,
-	baseMessages []providers.ChatMessage,
-	toolCalls []providers.ToolCall,
-	sink StreamSink,
-) error {
-	if s.tools == nil || len(toolCalls) == 0 {
-		message := "The model requested a tool, but no executable tool was available."
-		_ = s.repo.UpdateRunState(ctx, runID, RunFailed, "tool_unavailable", message, true)
-		_ = sink("tool_approval_required", map[string]any{"run_id": runID, "message": message})
-		return errors.New(message)
+type modelLoopRequest struct {
+	Principal          PrincipalContext
+	Conversation       Conversation
+	Agent              AgentContext
+	Run                ChatRun
+	AssistantMessageID string
+	Provider           providers.Provider
+	APIKey             string
+	Model              string
+	Memories           []MemorySnippet
+	BranchID           string
+	Messages           []providers.ChatMessage
+	Tools              []RuntimeTool
+}
+
+func (s *Service) executeModelLoop(ctx context.Context, request modelLoopRequest, sink StreamSink) error {
+	messages := append([]providers.ChatMessage{}, request.Messages...)
+	toolByProviderName := map[string]RuntimeTool{}
+	for _, tool := range request.Tools {
+		toolByProviderName[tool.ProviderName] = tool
 	}
-	messages := append([]providers.ChatMessage{}, baseMessages...)
-	messages = append(messages, providers.ChatMessage{Role: "assistant", ToolCalls: toolCalls})
-	for _, call := range toolCalls {
-		result, err := s.tools.ExecuteAllowedTool(ctx, principal.WorkspaceID, call.Function.Name, call.Function.Arguments)
-		if err != nil {
-			_ = s.repo.UpdateRunState(ctx, runID, RunFailed, "tool_execution_failed", err.Error(), true)
-			_ = sink("run_failed", map[string]any{"run_id": runID, "message": err.Error()})
+	maxIterations := s.maxToolIterations(request.Agent)
+	providerTools := providerTools(request.Tools)
+	for iteration := 0; ; iteration++ {
+		if err := s.repo.UpdateRunState(ctx, request.Run.ID, RunStreaming, "", "", false); err != nil {
 			return err
 		}
-		if err := sink("tool_result", map[string]any{"tool_call_id": call.ID, "name": call.Function.Name, "result": result}); err != nil {
-			return err
-		}
-		messages = append(messages, providers.ChatMessage{
-			Role:       "tool",
-			ToolCallID: call.ID,
-			Content:    result,
+		events, err := s.client.StreamChat(ctx, providers.StreamRequest{
+			Provider:    request.Provider,
+			APIKey:      request.APIKey,
+			Model:       request.Model,
+			Messages:    messages,
+			Tools:       providerTools,
+			Temperature: request.Agent.Temperature,
 		})
+		if err != nil {
+			_ = s.repo.UpdateRunState(ctx, request.Run.ID, RunFailed, "provider_unavailable", err.Error(), true)
+			_ = sink("run_failed", map[string]any{"run_id": request.Run.ID, "message": err.Error()})
+			return err
+		}
+		content, usage, toolCalls, err := s.consumeModelStream(ctx, request.Run.ID, request.AssistantMessageID, events, sink)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+		if len(toolCalls) == 0 {
+			_ = s.repo.UpdateMessageContent(ctx, request.AssistantMessageID, content, usage)
+			_ = s.repo.UpdateRunState(ctx, request.Run.ID, RunCompleted, "", "", true)
+			s.emitSummaryQueueEvent(ctx, request.Principal, request.Conversation, request.Agent, request.Memories, request.BranchID, sink)
+			return sink("run_completed", map[string]any{"run_id": request.Run.ID, "assistant_message_id": request.AssistantMessageID})
+		}
+		if iteration >= maxIterations {
+			message := "The tool iteration limit was reached before the model produced a final answer."
+			_ = s.repo.UpdateRunState(ctx, request.Run.ID, RunFailed, "tool_iteration_limit", message, true)
+			_ = sink("run_failed", map[string]any{"run_id": request.Run.ID, "message": message})
+			return errors.New(message)
+		}
+		_ = s.repo.UpdateMessageContentAndToolCalls(ctx, request.AssistantMessageID, content, usage, toolCalls)
+		persistedCalls, needsApproval, err := s.persistRequestedToolCalls(ctx, request, toolCalls, toolByProviderName)
+		if err != nil {
+			_ = s.repo.UpdateRunState(ctx, request.Run.ID, RunFailed, "tool_resolution_failed", err.Error(), true)
+			_ = sink("run_failed", map[string]any{"run_id": request.Run.ID, "message": err.Error()})
+			return err
+		}
+		if needsApproval {
+			_ = s.repo.UpdateRunState(ctx, request.Run.ID, RunWaitingForApproval, "", "", false)
+			return sink("tool_approval_required", map[string]any{"run_id": request.Run.ID, "tool_calls": persistedCalls})
+		}
+		messages = append(messages, providers.ChatMessage{Role: RoleAssistant, Content: content, ToolCalls: toolCalls})
+		for _, call := range persistedCalls {
+			toolMessage, err := s.executePersistedToolCall(ctx, request, call, sink)
+			if err != nil {
+				return err
+			}
+			messages = append(messages, toolMessage)
+		}
 	}
-	_ = s.repo.UpdateRunState(ctx, runID, RunStreaming, "", "", false)
-	events, err := s.client.StreamChat(ctx, providers.StreamRequest{
-		Provider: provider,
-		APIKey:   apiKey,
-		Model:    model,
-		Messages: messages,
-	})
-	if err != nil {
-		_ = s.repo.UpdateRunState(ctx, runID, RunFailed, "provider_unavailable", err.Error(), true)
-		return err
-	}
+}
+
+func (s *Service) consumeModelStream(ctx context.Context, runID string, assistantMessageID string, events <-chan providers.StreamEvent, sink StreamSink) (string, UsageValues, []providers.ToolCall, error) {
 	var contentBuilder strings.Builder
 	var usage UsageValues
+	var toolCalls []providers.ToolCall
 	for event := range events {
+		cancelled, err := s.repo.CancellationRequested(ctx, runID)
+		if err != nil {
+			return "", usage, nil, err
+		}
+		if cancelled {
+			_ = s.repo.UpdateRunState(ctx, runID, RunCancelled, "", "", true)
+			_ = sink("run_cancelled", map[string]any{"run_id": runID})
+			return "", usage, nil, context.Canceled
+		}
 		if event.Error != nil {
 			_ = s.repo.UpdateRunState(ctx, runID, RunFailed, "provider_stream_failed", event.Error.Error(), true)
 			_ = sink("run_failed", map[string]any{"run_id": runID, "message": event.Error.Error()})
-			return event.Error
+			return "", usage, nil, event.Error
 		}
 		switch event.Type {
 		case "content_delta":
 			contentBuilder.WriteString(event.Content)
 			_ = s.repo.UpdateMessageContent(ctx, assistantMessageID, contentBuilder.String(), usage)
 			if err := sink("content_delta", map[string]string{"delta": event.Content}); err != nil {
-				return err
+				return "", usage, nil, err
+			}
+		case "reasoning_delta":
+			if err := sink("reasoning_delta", map[string]string{"delta": event.Reasoning}); err != nil {
+				return "", usage, nil, err
+			}
+		case "tool_call_delta":
+			if event.ToolCall != nil {
+				toolCalls = mergeToolCall(toolCalls, *event.ToolCall)
+			}
+			if err := sink(event.Type, event.ToolCall); err != nil {
+				return "", usage, nil, err
+			}
+		case "tool_call_ready":
+			if err := sink(event.Type, map[string]any{"run_id": runID, "tool_calls": toolCalls}); err != nil {
+				return "", usage, nil, err
 			}
 		case "usage":
 			if event.Usage != nil {
@@ -594,24 +740,179 @@ func (s *Service) executeToolFollowup(
 				_ = s.repo.UpdateRunUsage(ctx, runID, usage)
 				_ = s.repo.UpdateMessageContent(ctx, assistantMessageID, contentBuilder.String(), usage)
 				if err := sink("usage", usage); err != nil {
-					return err
+					return "", usage, nil, err
 				}
 			}
 		case "run_completed":
-			_ = s.repo.UpdateMessageContent(ctx, assistantMessageID, contentBuilder.String(), usage)
-			_ = s.repo.UpdateRunState(ctx, runID, RunCompleted, "", "", true)
-			s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, branchID, sink)
-			return sink("run_completed", map[string]any{"run_id": runID, "assistant_message_id": assistantMessageID})
+			return contentBuilder.String(), usage, toolCalls, nil
 		}
 	}
-	_ = s.repo.UpdateRunState(ctx, runID, RunCompleted, "", "", true)
-	s.emitSummaryQueueEvent(ctx, principal, conversation, agent, memories, branchID, sink)
-	return sink("run_completed", map[string]any{"run_id": runID, "assistant_message_id": assistantMessageID})
+	return contentBuilder.String(), usage, toolCalls, nil
+}
+
+func (s *Service) persistRequestedToolCalls(ctx context.Context, request modelLoopRequest, calls []providers.ToolCall, tools map[string]RuntimeTool) ([]ToolCallRecord, bool, error) {
+	records := make([]ToolCallRecord, 0, len(calls))
+	needsApproval := false
+	for _, call := range calls {
+		tool, ok := tools[call.Function.Name]
+		if !ok {
+			return nil, false, fmt.Errorf("%w: tool %q is not available to this agent", ErrInvalidInput, call.Function.Name)
+		}
+		state := ToolCallApproved
+		approvalState := ToolApprovalNotRequired
+		if tool.PermissionMode == ToolPermissionAsk {
+			state = ToolCallWaitingForApproval
+			approvalState = ToolApprovalPending
+			needsApproval = true
+		}
+		record, err := s.repo.CreateToolCall(ctx, ToolCallRecord{
+			ChatRunID:          request.Run.ID,
+			MessageID:          request.AssistantMessageID,
+			ToolID:             tool.ID,
+			ProviderToolCallID: call.ID,
+			ProviderName:       tool.ProviderName,
+			Name:               tool.Name,
+			Input:              call.Function.Arguments,
+			State:              state,
+			ApprovalState:      approvalState,
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		records = append(records, record)
+	}
+	return records, needsApproval, nil
+}
+
+func (s *Service) executePersistedToolCall(ctx context.Context, request modelLoopRequest, call ToolCallRecord, sink StreamSink) (providers.ChatMessage, error) {
+	if call.State == ToolCallSucceeded {
+		return providers.ChatMessage{Role: RoleTool, ToolCallID: call.ProviderToolCallID, Content: call.Output}, nil
+	}
+	if call.State == ToolCallDenied {
+		content := call.Output
+		if content == "" {
+			content = "Tool call denied by the workspace owner."
+			_ = s.repo.CompleteToolCall(ctx, call.ID, ToolCallDenied, content, false, "", "Tool call denied by the workspace owner.")
+			_, _ = s.repo.CreateMessage(ctx, Message{
+				ConversationID:  request.Conversation.ID,
+				BranchID:        request.BranchID,
+				ParentMessageID: request.AssistantMessageID,
+				Role:            RoleTool,
+				Content:         content,
+				ToolCallID:      call.ProviderToolCallID,
+				ProviderID:      request.Provider.ID,
+				Model:           request.Model,
+			})
+			_ = sink("tool_result", map[string]any{"tool_call_id": call.ID, "provider_tool_call_id": call.ProviderToolCallID, "name": call.Name, "result": content, "denied": true})
+		}
+		return providers.ChatMessage{Role: RoleTool, ToolCallID: call.ProviderToolCallID, Content: content}, nil
+	}
+	if call.ApprovalState == ToolApprovalPending {
+		return providers.ChatMessage{}, ErrApprovalRequired
+	}
+	if s.tools == nil {
+		return providers.ChatMessage{}, errors.New("tool provider is unavailable")
+	}
+	if err := s.repo.UpdateToolCallState(ctx, call.ID, ToolCallRunning, call.ApprovalState, "", ""); err != nil {
+		return providers.ChatMessage{}, err
+	}
+	result, err := s.tools.ExecuteRuntimeTool(ctx, ToolExecutionRequest{
+		WorkspaceID:     request.Principal.WorkspaceID,
+		ToolID:          call.ToolID,
+		Arguments:       call.Input,
+		Timeout:         s.toolTimeout(),
+		MaxResultBytes:  32 * 1024,
+		ProviderName:    call.ProviderName,
+		ToolDisplayName: call.Name,
+	})
+	if err != nil {
+		state := ToolCallFailed
+		code := "tool_execution_failed"
+		if errors.Is(err, context.DeadlineExceeded) {
+			state = ToolCallTimedOut
+			code = "tool_timeout"
+		}
+		_ = s.repo.CompleteToolCall(ctx, call.ID, state, "", false, code, err.Error())
+		_ = s.repo.UpdateRunState(ctx, request.Run.ID, RunFailed, code, err.Error(), true)
+		_ = sink("run_failed", map[string]any{"run_id": request.Run.ID, "message": err.Error()})
+		return providers.ChatMessage{}, err
+	}
+	if err := s.repo.CompleteToolCall(ctx, call.ID, ToolCallSucceeded, result.Content, result.Truncated, "", ""); err != nil {
+		return providers.ChatMessage{}, err
+	}
+	if _, err := s.repo.CreateMessage(ctx, Message{
+		ConversationID:  request.Conversation.ID,
+		BranchID:        request.BranchID,
+		ParentMessageID: request.AssistantMessageID,
+		Role:            RoleTool,
+		Content:         result.Content,
+		ToolCallID:      call.ProviderToolCallID,
+		ProviderID:      request.Provider.ID,
+		Model:           request.Model,
+	}); err != nil {
+		return providers.ChatMessage{}, err
+	}
+	if err := sink("tool_result", map[string]any{"tool_call_id": call.ID, "provider_tool_call_id": call.ProviderToolCallID, "name": call.Name, "result": result.Content, "truncated": result.Truncated}); err != nil {
+		return providers.ChatMessage{}, err
+	}
+	return providers.ChatMessage{Role: RoleTool, ToolCallID: call.ProviderToolCallID, Content: result.Content}, nil
+}
+
+func (s *Service) runtimeTools(ctx context.Context, principal PrincipalContext, conversation Conversation, agent AgentContext) ([]RuntimeTool, error) {
+	if s.tools == nil || agent.ID == "" {
+		return nil, nil
+	}
+	return s.tools.RuntimeTools(ctx, ToolExposureRequest{
+		WorkspaceID:            principal.WorkspaceID,
+		AgentID:                agent.ID,
+		ConversationID:         conversation.ID,
+		AgentDefaultPermission: agent.ToolPermissionDefault,
+	})
+}
+
+func providerTools(tools []RuntimeTool) []providers.ChatTool {
+	out := make([]providers.ChatTool, 0, len(tools))
+	for _, tool := range tools {
+		parameters := json.RawMessage(`{}`)
+		if strings.TrimSpace(tool.InputSchema) != "" && json.Valid([]byte(tool.InputSchema)) {
+			parameters = json.RawMessage(tool.InputSchema)
+		}
+		out = append(out, providers.ChatTool{
+			Type: "function",
+			Function: providers.ChatToolFunction{
+				Name:        tool.ProviderName,
+				Description: tool.Description,
+				Parameters:  parameters,
+			},
+		})
+	}
+	return out
+}
+
+func (s *Service) maxToolIterations(agent AgentContext) int {
+	limit := agent.MaxToolIterations
+	if limit <= 0 {
+		limit = s.cfg.Chat.MaxToolIterations
+	}
+	if s.cfg.Chat.MaxToolIterations > 0 && limit > s.cfg.Chat.MaxToolIterations {
+		limit = s.cfg.Chat.MaxToolIterations
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+	return limit
+}
+
+func (s *Service) toolTimeout() time.Duration {
+	if s.cfg.Chat.DefaultTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return s.cfg.Chat.DefaultTimeout
 }
 
 func (s *Service) resolveAgent(ctx context.Context, conversation Conversation) (AgentContext, error) {
 	if s.agents == nil || conversation.AgentID == "" {
-		return AgentContext{MemoryAccessMode: "pinned_only"}, nil
+		return AgentContext{MemoryAccessMode: "pinned_only", ToolPermissionDefault: ToolPermissionAsk, MaxToolIterations: s.cfg.Chat.MaxToolIterations, Temperature: 0.7, Active: true}, nil
 	}
 	agent, err := s.agents.GetChatAgent(ctx, conversation.WorkspaceID, conversation.AgentID)
 	if err != nil {
@@ -619,6 +920,15 @@ func (s *Service) resolveAgent(ctx context.Context, conversation Conversation) (
 	}
 	if agent.MemoryAccessMode == "" {
 		agent.MemoryAccessMode = "pinned_only"
+	}
+	if agent.ToolPermissionDefault == "" {
+		agent.ToolPermissionDefault = ToolPermissionAsk
+	}
+	if agent.MaxToolIterations <= 0 {
+		agent.MaxToolIterations = s.cfg.Chat.MaxToolIterations
+	}
+	if agent.Temperature <= 0 {
+		agent.Temperature = 0.7
 	}
 	return agent, nil
 }

@@ -31,6 +31,7 @@ type Repository interface {
 	ListMessages(ctx context.Context, workspaceID string, ownerUserID string, conversationID string) ([]Message, error)
 	RecentMessages(ctx context.Context, workspaceID string, ownerUserID string, conversationID string, limit int) ([]Message, error)
 	UpdateMessageContent(ctx context.Context, messageID string, content string, usage UsageValues) error
+	UpdateMessageContentAndToolCalls(ctx context.Context, messageID string, content string, usage UsageValues, toolCalls []providers.ToolCall) error
 	CreateBranch(ctx context.Context, branch Branch) (Branch, error)
 	CreateRun(ctx context.Context, run ChatRun) (ChatRun, error)
 	UpdateRunState(ctx context.Context, runID string, state string, errorCode string, errorMessage string, completed bool) error
@@ -39,7 +40,16 @@ type Repository interface {
 	CancellationRequested(ctx context.Context, runID string) (bool, error)
 	CleanupInterruptedRuns(ctx context.Context, now time.Time) (int64, error)
 	RecalculateConversationTitles(ctx context.Context, limit int) (int64, error)
+	GetRun(ctx context.Context, workspaceID string, ownerUserID string, runID string) (ChatRun, error)
 	FindRunByAssistantMessage(ctx context.Context, workspaceID string, ownerUserID string, messageID string) (ChatRun, error)
+	CreateToolCall(ctx context.Context, record ToolCallRecord) (ToolCallRecord, error)
+	GetToolCall(ctx context.Context, workspaceID string, ownerUserID string, toolCallID string) (ToolCallRecord, ChatRun, Conversation, error)
+	ListToolCallsForRun(ctx context.Context, runID string) ([]ToolCallRecord, error)
+	PendingToolCallsForRun(ctx context.Context, runID string) ([]ToolCallRecord, error)
+	UpdateToolCallState(ctx context.Context, toolCallID string, state string, approvalState string, errorCode string, errorMessage string) error
+	CompleteToolCall(ctx context.Context, toolCallID string, state string, output string, truncated bool, errorCode string, errorMessage string) error
+	RecordToolApproval(ctx context.Context, approval ToolApprovalRecord) (ToolApprovalRecord, error)
+	ListPendingToolApprovals(ctx context.Context, workspaceID string, ownerUserID string) ([]ToolCallRecord, error)
 }
 
 type UsageValues struct {
@@ -296,6 +306,17 @@ func (r *SQLRepository) UpdateMessageContent(ctx context.Context, messageID stri
 	return err
 }
 
+func (r *SQLRepository) UpdateMessageContentAndToolCalls(ctx context.Context, messageID string, content string, usage UsageValues, toolCalls []providers.ToolCall) error {
+	now := time.Now().UTC()
+	query := `UPDATE messages SET content = ` + r.store.Placeholder(1) + `, markdown = ` + r.store.Placeholder(2) +
+		`, prompt_tokens = ` + r.store.Placeholder(3) + `, completion_tokens = ` + r.store.Placeholder(4) +
+		`, total_tokens = ` + r.store.Placeholder(5) + `, metadata = ` + r.store.Placeholder(6) +
+		`, updated_at = ` + r.store.Placeholder(7) + ` WHERE id = ` + r.store.Placeholder(8)
+	metadata := messageMetadata(Message{ToolCalls: toolCalls})
+	_, err := r.store.DB.ExecContext(ctx, query, content, content, nullInt(usage.PromptTokens), nullInt(usage.CompletionTokens), nullInt(usage.TotalTokens), metadata, r.store.NowArg(now), messageID)
+	return err
+}
+
 func (r *SQLRepository) CreateBranch(ctx context.Context, branch Branch) (Branch, error) {
 	now := time.Now().UTC()
 	branch.ID = id.New()
@@ -441,10 +462,19 @@ func (r *SQLRepository) RecalculateConversationTitles(ctx context.Context, limit
 	return updated, nil
 }
 
+func (r *SQLRepository) GetRun(ctx context.Context, workspaceID string, ownerUserID string, runID string) (ChatRun, error) {
+	query := runSelect() + `
+FROM chat_runs cr JOIN conversations c ON c.id = cr.conversation_id
+WHERE c.workspace_id = ` + r.store.Placeholder(1) + ` AND c.owner_user_id = ` + r.store.Placeholder(2) + ` AND cr.id = ` + r.store.Placeholder(3)
+	run, err := scanRun(r.store.DB.QueryRowContext(ctx, query, workspaceID, ownerUserID, runID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ChatRun{}, ErrNotFound
+	}
+	return run, err
+}
+
 func (r *SQLRepository) FindRunByAssistantMessage(ctx context.Context, workspaceID string, ownerUserID string, messageID string) (ChatRun, error) {
-	query := `SELECT cr.id, cr.conversation_id, cr.user_message_id, cr.assistant_message_id, cr.branch_id, cr.provider_id, cr.model, cr.state,
-cr.error_code, cr.error_message, cr.cancellation_requested_at, cr.started_at, cr.completed_at, cr.prompt_tokens, cr.completion_tokens,
-cr.total_tokens, cr.created_at, cr.updated_at
+	query := runSelect() + `
 FROM chat_runs cr JOIN conversations c ON c.id = cr.conversation_id
 WHERE c.workspace_id = ` + r.store.Placeholder(1) + ` AND c.owner_user_id = ` + r.store.Placeholder(2) + ` AND cr.assistant_message_id = ` + r.store.Placeholder(3) +
 		` ORDER BY cr.created_at DESC LIMIT 1`
@@ -453,6 +483,127 @@ WHERE c.workspace_id = ` + r.store.Placeholder(1) + ` AND c.owner_user_id = ` + 
 		return ChatRun{}, ErrNotFound
 	}
 	return run, err
+}
+
+func (r *SQLRepository) CreateToolCall(ctx context.Context, record ToolCallRecord) (ToolCallRecord, error) {
+	now := time.Now().UTC()
+	record.ID = id.New()
+	if record.State == "" {
+		record.State = ToolCallPending
+	}
+	if record.ApprovalState == "" {
+		record.ApprovalState = ToolApprovalNotRequired
+	}
+	record.CreatedAt = now
+	record.UpdatedAt = now
+	query := `INSERT INTO tool_calls (id, chat_run_id, message_id, tool_id, provider_tool_call_id, provider_name, name, input, output,
+output_truncated, state, approval_state, error_code, error_message, started_at, completed_at, input_bytes, output_bytes, created_at, updated_at)
+VALUES (` + placeholders(r.store, 20) + `)`
+	_, err := r.store.DB.ExecContext(ctx, query,
+		record.ID, record.ChatRunID, nullableString(record.MessageID), nullableString(record.ToolID), nullableString(record.ProviderToolCallID),
+		nullableString(record.ProviderName), record.Name, validJSON(record.Input), nullableString(record.Output), record.OutputTruncated,
+		record.State, record.ApprovalState, nullableString(record.ErrorCode), nullableString(record.ErrorMessage),
+		timePtrArg(r.store, record.StartedAt), timePtrArg(r.store, record.CompletedAt), len(record.Input), len(record.Output),
+		r.store.NowArg(now), r.store.NowArg(now),
+	)
+	return record, err
+}
+
+func (r *SQLRepository) GetToolCall(ctx context.Context, workspaceID string, ownerUserID string, toolCallID string) (ToolCallRecord, ChatRun, Conversation, error) {
+	query := toolCallSelect(r.store) + `, ` + runColumns("cr") + `, ` + conversationColumns("c") + `
+FROM tool_calls tc
+JOIN chat_runs cr ON cr.id = tc.chat_run_id
+JOIN conversations c ON c.id = cr.conversation_id
+WHERE c.workspace_id = ` + r.store.Placeholder(1) + ` AND c.owner_user_id = ` + r.store.Placeholder(2) + ` AND tc.id = ` + r.store.Placeholder(3)
+	var record ToolCallRecord
+	var run ChatRun
+	var conversation Conversation
+	err := scanToolCallRunConversation(r.store.DB.QueryRowContext(ctx, query, workspaceID, ownerUserID, toolCallID), &record, &run, &conversation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ToolCallRecord{}, ChatRun{}, Conversation{}, ErrNotFound
+	}
+	return record, run, conversation, err
+}
+
+func (r *SQLRepository) ListToolCallsForRun(ctx context.Context, runID string) ([]ToolCallRecord, error) {
+	query := toolCallSelect(r.store) + ` FROM tool_calls tc WHERE tc.chat_run_id = ` + r.store.Placeholder(1) + ` ORDER BY tc.created_at, tc.id`
+	return r.queryToolCalls(ctx, query, runID)
+}
+
+func (r *SQLRepository) PendingToolCallsForRun(ctx context.Context, runID string) ([]ToolCallRecord, error) {
+	query := toolCallSelect(r.store) + ` FROM tool_calls tc WHERE tc.chat_run_id = ` + r.store.Placeholder(1) +
+		` AND tc.state = ` + r.store.Placeholder(2) + ` ORDER BY tc.created_at, tc.id`
+	return r.queryToolCalls(ctx, query, runID, ToolCallWaitingForApproval)
+}
+
+func (r *SQLRepository) UpdateToolCallState(ctx context.Context, toolCallID string, state string, approvalState string, errorCode string, errorMessage string) error {
+	now := time.Now().UTC()
+	query := `UPDATE tool_calls SET state = ` + r.store.Placeholder(1) + `, approval_state = ` + r.store.Placeholder(2) +
+		`, error_code = ` + r.store.Placeholder(3) + `, error_message = ` + r.store.Placeholder(4) +
+		`, updated_at = ` + r.store.Placeholder(5)
+	args := []any{state, approvalState, nullableString(errorCode), nullableString(errorMessage), r.store.NowArg(now)}
+	if state == ToolCallRunning {
+		args = append(args, r.store.NowArg(now))
+		query += `, started_at = COALESCE(started_at, ` + r.store.Placeholder(len(args)) + `)`
+	}
+	if terminalToolCallState(state) {
+		args = append(args, r.store.NowArg(now))
+		query += `, completed_at = ` + r.store.Placeholder(len(args))
+	}
+	args = append(args, toolCallID)
+	query += ` WHERE id = ` + r.store.Placeholder(len(args))
+	_, err := r.store.DB.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (r *SQLRepository) CompleteToolCall(ctx context.Context, toolCallID string, state string, output string, truncated bool, errorCode string, errorMessage string) error {
+	now := time.Now().UTC()
+	query := `UPDATE tool_calls SET state = ` + r.store.Placeholder(1) + `, output = ` + r.store.Placeholder(2) +
+		`, output_truncated = ` + r.store.Placeholder(3) + `, approval_state = CASE WHEN approval_state = 'pending' THEN 'approved' ELSE approval_state END` +
+		`, error_code = ` + r.store.Placeholder(4) + `, error_message = ` + r.store.Placeholder(5) +
+		`, completed_at = ` + r.store.Placeholder(6) + `, output_bytes = ` + r.store.Placeholder(7) + `, updated_at = ` + r.store.Placeholder(8) +
+		` WHERE id = ` + r.store.Placeholder(9)
+	_, err := r.store.DB.ExecContext(ctx, query, state, nullableString(output), truncated, nullableString(errorCode), nullableString(errorMessage),
+		r.store.NowArg(now), len(output), r.store.NowArg(now), toolCallID)
+	return err
+}
+
+func (r *SQLRepository) RecordToolApproval(ctx context.Context, approval ToolApprovalRecord) (ToolApprovalRecord, error) {
+	now := time.Now().UTC()
+	approval.ID = id.New()
+	approval.CreatedAt = now
+	query := `INSERT INTO tool_approvals (id, workspace_id, tool_call_id, tool_id, agent_id, conversation_id, actor_user_id, decision, created_at)
+VALUES (` + placeholders(r.store, 9) + `)`
+	_, err := r.store.DB.ExecContext(ctx, query, approval.ID, approval.WorkspaceID, nullableString(approval.ToolCallID), nullableString(approval.ToolID),
+		nullableString(approval.AgentID), nullableString(approval.ConversationID), nullableString(approval.ActorUserID), approval.Decision, r.store.NowArg(now))
+	return approval, err
+}
+
+func (r *SQLRepository) ListPendingToolApprovals(ctx context.Context, workspaceID string, ownerUserID string) ([]ToolCallRecord, error) {
+	query := toolCallSelect(r.store) + `
+FROM tool_calls tc
+JOIN chat_runs cr ON cr.id = tc.chat_run_id
+JOIN conversations c ON c.id = cr.conversation_id
+WHERE c.workspace_id = ` + r.store.Placeholder(1) + ` AND c.owner_user_id = ` + r.store.Placeholder(2) +
+		` AND tc.state = ` + r.store.Placeholder(3) + ` ORDER BY tc.created_at`
+	return r.queryToolCalls(ctx, query, workspaceID, ownerUserID, ToolCallWaitingForApproval)
+}
+
+func (r *SQLRepository) queryToolCalls(ctx context.Context, query string, args ...any) ([]ToolCallRecord, error) {
+	rows, err := r.store.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var calls []ToolCallRecord
+	for rows.Next() {
+		call, err := scanToolCall(rows)
+		if err != nil {
+			return nil, err
+		}
+		calls = append(calls, call)
+	}
+	return calls, rows.Err()
 }
 
 func (r *SQLRepository) queryMessages(ctx context.Context, query string, args ...any) ([]Message, error) {
@@ -478,10 +629,44 @@ m.tool_call_id, m.metadata, m.prompt_tokens, m.completion_tokens, m.total_tokens
 FROM messages m JOIN conversations c ON c.id = m.conversation_id`
 }
 
+func runSelect() string {
+	return `SELECT ` + runColumns("cr")
+}
+
+func runColumns(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return prefix + `id, ` + prefix + `conversation_id, ` + prefix + `user_message_id, ` + prefix + `assistant_message_id, ` +
+		prefix + `branch_id, ` + prefix + `provider_id, ` + prefix + `model, ` + prefix + `state, ` + prefix + `error_code, ` +
+		prefix + `error_message, ` + prefix + `cancellation_requested_at, ` + prefix + `started_at, ` + prefix + `completed_at, ` +
+		prefix + `prompt_tokens, ` + prefix + `completion_tokens, ` + prefix + `total_tokens, ` + prefix + `created_at, ` + prefix + `updated_at`
+}
+
 func conversationSelect() string {
 	return `SELECT id, workspace_id, owner_user_id, agent_id, provider_id, model, title, summary, summary_updated_at,
 summary_status, summary_error, summary_source_start_message_id, summary_source_end_message_id, summary_provider_id,
 summary_model, summary_generated_at, summary_estimated_input_tokens, summary_version, archived_at, deleted_at, created_at, updated_at`
+}
+
+func conversationColumns(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return prefix + `id, ` + prefix + `workspace_id, ` + prefix + `owner_user_id, ` + prefix + `agent_id, ` + prefix + `provider_id, ` +
+		prefix + `model, ` + prefix + `title, ` + prefix + `summary, ` + prefix + `summary_updated_at, ` + prefix + `summary_status, ` +
+		prefix + `summary_error, ` + prefix + `summary_source_start_message_id, ` + prefix + `summary_source_end_message_id, ` +
+		prefix + `summary_provider_id, ` + prefix + `summary_model, ` + prefix + `summary_generated_at, ` +
+		prefix + `summary_estimated_input_tokens, ` + prefix + `summary_version, ` + prefix + `archived_at, ` + prefix + `deleted_at, ` +
+		prefix + `created_at, ` + prefix + `updated_at`
+}
+
+func toolCallSelect(store *database.Store) string {
+	return `SELECT tc.id, tc.chat_run_id, tc.message_id, tc.tool_id, tc.provider_tool_call_id, tc.provider_name, tc.name, tc.input,
+tc.output, tc.output_truncated, tc.state, tc.approval_state, tc.error_code, tc.error_message, tc.started_at, tc.completed_at,
+tc.created_at, tc.updated_at`
 }
 
 func scanConversation(row rowScanner) (Conversation, error) {
@@ -548,6 +733,198 @@ func scanConversation(row rowScanner) (Conversation, error) {
 		return Conversation{}, err
 	}
 	return item, nil
+}
+
+func scanToolCall(row rowScanner) (ToolCallRecord, error) {
+	var item ToolCallRecord
+	var messageID sql.NullString
+	var toolID sql.NullString
+	var providerToolCallID sql.NullString
+	var providerName sql.NullString
+	var output sql.NullString
+	var errorCode sql.NullString
+	var errorMessage sql.NullString
+	var startedRaw any
+	var completedRaw any
+	var createdRaw any
+	var updatedRaw any
+	if err := row.Scan(&item.ID, &item.ChatRunID, &messageID, &toolID, &providerToolCallID, &providerName, &item.Name, &item.Input,
+		&output, &item.OutputTruncated, &item.State, &item.ApprovalState, &errorCode, &errorMessage, &startedRaw, &completedRaw,
+		&createdRaw, &updatedRaw); err != nil {
+		return ToolCallRecord{}, err
+	}
+	item.MessageID = messageID.String
+	item.ToolID = toolID.String
+	item.ProviderToolCallID = providerToolCallID.String
+	item.ProviderName = providerName.String
+	item.Output = output.String
+	item.ErrorCode = errorCode.String
+	item.ErrorMessage = errorMessage.String
+	var err error
+	item.StartedAt, err = nullableTime(startedRaw)
+	if err != nil {
+		return ToolCallRecord{}, err
+	}
+	item.CompletedAt, err = nullableTime(completedRaw)
+	if err != nil {
+		return ToolCallRecord{}, err
+	}
+	item.CreatedAt, err = database.ParseTime(createdRaw)
+	if err != nil {
+		return ToolCallRecord{}, err
+	}
+	item.UpdatedAt, err = database.ParseTime(updatedRaw)
+	if err != nil {
+		return ToolCallRecord{}, err
+	}
+	return item, nil
+}
+
+func scanToolCallRunConversation(row rowScanner, call *ToolCallRecord, run *ChatRun, conversation *Conversation) error {
+	var messageID sql.NullString
+	var toolID sql.NullString
+	var providerToolCallID sql.NullString
+	var providerName sql.NullString
+	var output sql.NullString
+	var callErrorCode sql.NullString
+	var callErrorMessage sql.NullString
+	var callStartedRaw any
+	var callCompletedRaw any
+	var callCreatedRaw any
+	var callUpdatedRaw any
+	var userID sql.NullString
+	var assistantID sql.NullString
+	var branchID sql.NullString
+	var runProviderID sql.NullString
+	var runModel sql.NullString
+	var runErrorCode sql.NullString
+	var runErrorMessage sql.NullString
+	var cancelRaw any
+	var runStartedRaw any
+	var runCompletedRaw any
+	var prompt sql.NullInt64
+	var completion sql.NullInt64
+	var total sql.NullInt64
+	var runCreatedRaw any
+	var runUpdatedRaw any
+	var agentID sql.NullString
+	var conversationProviderID sql.NullString
+	var conversationModel sql.NullString
+	var summaryUpdatedRaw any
+	var summaryStatus sql.NullString
+	var summaryError sql.NullString
+	var summarySourceStart sql.NullString
+	var summarySourceEnd sql.NullString
+	var summaryProviderID sql.NullString
+	var summaryModel sql.NullString
+	var summaryGeneratedRaw any
+	var summaryEstimated sql.NullInt64
+	var summaryVersion sql.NullInt64
+	var archivedRaw any
+	var deletedRaw any
+	var conversationCreatedRaw any
+	var conversationUpdatedRaw any
+	if err := row.Scan(&call.ID, &call.ChatRunID, &messageID, &toolID, &providerToolCallID, &providerName, &call.Name, &call.Input,
+		&output, &call.OutputTruncated, &call.State, &call.ApprovalState, &callErrorCode, &callErrorMessage, &callStartedRaw, &callCompletedRaw,
+		&callCreatedRaw, &callUpdatedRaw,
+		&run.ID, &run.ConversationID, &userID, &assistantID, &branchID, &runProviderID, &runModel, &run.State, &runErrorCode, &runErrorMessage,
+		&cancelRaw, &runStartedRaw, &runCompletedRaw, &prompt, &completion, &total, &runCreatedRaw, &runUpdatedRaw,
+		&conversation.ID, &conversation.WorkspaceID, &conversation.OwnerUserID, &agentID, &conversationProviderID, &conversationModel,
+		&conversation.Title, &conversation.Summary, &summaryUpdatedRaw, &summaryStatus, &summaryError, &summarySourceStart, &summarySourceEnd,
+		&summaryProviderID, &summaryModel, &summaryGeneratedRaw, &summaryEstimated, &summaryVersion, &archivedRaw, &deletedRaw,
+		&conversationCreatedRaw, &conversationUpdatedRaw); err != nil {
+		return err
+	}
+	call.MessageID = messageID.String
+	call.ToolID = toolID.String
+	call.ProviderToolCallID = providerToolCallID.String
+	call.ProviderName = providerName.String
+	call.Output = output.String
+	call.ErrorCode = callErrorCode.String
+	call.ErrorMessage = callErrorMessage.String
+	run.UserMessageID = userID.String
+	run.AssistantMessageID = assistantID.String
+	run.BranchID = branchID.String
+	run.ProviderID = runProviderID.String
+	run.Model = runModel.String
+	run.ErrorCode = runErrorCode.String
+	run.ErrorMessage = runErrorMessage.String
+	run.PromptTokens = int(prompt.Int64)
+	run.CompletionTokens = int(completion.Int64)
+	run.TotalTokens = int(total.Int64)
+	conversation.AgentID = agentID.String
+	conversation.ProviderID = conversationProviderID.String
+	conversation.Model = conversationModel.String
+	conversation.SummaryStatus = summaryStatus.String
+	if conversation.SummaryStatus == "" {
+		conversation.SummaryStatus = "idle"
+	}
+	conversation.SummaryError = summaryError.String
+	conversation.SummarySourceStartMessageID = summarySourceStart.String
+	conversation.SummarySourceEndMessageID = summarySourceEnd.String
+	conversation.SummaryProviderID = summaryProviderID.String
+	conversation.SummaryModel = summaryModel.String
+	conversation.SummaryEstimatedInputTokens = int(summaryEstimated.Int64)
+	conversation.SummaryVersion = int(summaryVersion.Int64)
+	var err error
+	call.StartedAt, err = nullableTime(callStartedRaw)
+	if err != nil {
+		return err
+	}
+	call.CompletedAt, err = nullableTime(callCompletedRaw)
+	if err != nil {
+		return err
+	}
+	call.CreatedAt, err = database.ParseTime(callCreatedRaw)
+	if err != nil {
+		return err
+	}
+	call.UpdatedAt, err = database.ParseTime(callUpdatedRaw)
+	if err != nil {
+		return err
+	}
+	run.CancellationRequested, err = nullableTime(cancelRaw)
+	if err != nil {
+		return err
+	}
+	run.StartedAt, err = nullableTime(runStartedRaw)
+	if err != nil {
+		return err
+	}
+	run.CompletedAt, err = nullableTime(runCompletedRaw)
+	if err != nil {
+		return err
+	}
+	run.CreatedAt, err = database.ParseTime(runCreatedRaw)
+	if err != nil {
+		return err
+	}
+	run.UpdatedAt, err = database.ParseTime(runUpdatedRaw)
+	if err != nil {
+		return err
+	}
+	conversation.SummaryUpdatedAt, err = nullableTime(summaryUpdatedRaw)
+	if err != nil {
+		return err
+	}
+	conversation.SummaryGeneratedAt, err = nullableTime(summaryGeneratedRaw)
+	if err != nil {
+		return err
+	}
+	conversation.ArchivedAt, err = nullableTime(archivedRaw)
+	if err != nil {
+		return err
+	}
+	conversation.DeletedAt, err = nullableTime(deletedRaw)
+	if err != nil {
+		return err
+	}
+	conversation.CreatedAt, err = database.ParseTime(conversationCreatedRaw)
+	if err != nil {
+		return err
+	}
+	conversation.UpdatedAt, err = database.ParseTime(conversationUpdatedRaw)
+	return err
 }
 
 func scanMessage(row rowScanner) (Message, error) {
@@ -706,6 +1083,26 @@ func messageMetadata(message Message) string {
 		return "{}"
 	}
 	return string(encoded)
+}
+
+func validJSON(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "{}"
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return "{}"
+	}
+	return value
+}
+
+func terminalToolCallState(state string) bool {
+	switch state {
+	case ToolCallSucceeded, ToolCallDenied, ToolCallFailed, ToolCallCancelled, ToolCallTimedOut:
+		return true
+	default:
+		return false
+	}
 }
 
 func toolCallsFromMetadata(raw any) []providers.ToolCall {

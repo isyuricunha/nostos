@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/isyuricunha/nostos/internal/auth"
+	"github.com/isyuricunha/nostos/internal/chat"
 	"github.com/isyuricunha/nostos/internal/config"
 	"github.com/isyuricunha/nostos/internal/crypto"
 	"github.com/isyuricunha/nostos/internal/providers"
@@ -129,6 +131,86 @@ func (s *Service) UpdateToolPermission(ctx context.Context, principal PrincipalC
 	return s.repo.UpdateToolPermission(ctx, principal.WorkspaceID, toolID, mode)
 }
 
+func (s *Service) AssignAgentServers(ctx context.Context, principal PrincipalContext, agentID string, serverIDs []string) error {
+	return s.repo.ReplaceAgentServerAssignments(ctx, principal.WorkspaceID, agentID, serverIDs)
+}
+
+func (s *Service) ListAgentServerAssignments(ctx context.Context, principal PrincipalContext, agentID string) ([]string, error) {
+	return s.repo.ListAgentServerAssignments(ctx, principal.WorkspaceID, agentID)
+}
+
+func (s *Service) SetAgentToolPermission(ctx context.Context, workspaceID string, agentID string, toolID string, mode string) error {
+	if mode != "deny" && mode != "ask" && mode != "allow" {
+		return fmt.Errorf("%w: permission mode is invalid", ErrInvalidInput)
+	}
+	return s.repo.UpsertAgentToolPermission(ctx, workspaceID, agentID, toolID, mode)
+}
+
+func (s *Service) DisableTool(ctx context.Context, workspaceID string, toolID string) error {
+	return s.repo.UpdateToolPermission(ctx, workspaceID, toolID, "deny")
+}
+
+func (s *Service) RuntimeTools(ctx context.Context, request chat.ToolExposureRequest) ([]chat.RuntimeTool, error) {
+	items, err := s.repo.ListAgentTools(ctx, request.WorkspaceID, request.AgentID, request.ConversationID)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]int{}
+	out := make([]chat.RuntimeTool, 0, len(items))
+	for _, item := range items {
+		mode := effectivePermission(item, request.AgentDefaultPermission)
+		if mode == chat.ToolPermissionDeny {
+			continue
+		}
+		providerName := providerToolName(item.Server.Name, item.Tool.Name, item.Tool.ID)
+		if count := seen[providerName]; count > 0 {
+			providerName = providerToolName(item.Server.Name, fmt.Sprintf("%s_%d", item.Tool.Name, count+1), item.Tool.ID)
+		}
+		seen[providerName]++
+		out = append(out, chat.RuntimeTool{
+			ID:             item.Tool.ID,
+			ServerID:       item.Tool.ServerID,
+			Name:           item.Tool.Name,
+			ProviderName:   providerName,
+			Description:    item.Tool.Description,
+			InputSchema:    item.Tool.InputSchema,
+			PermissionMode: mode,
+		})
+	}
+	return out, nil
+}
+
+func (s *Service) ExecuteRuntimeTool(ctx context.Context, request chat.ToolExecutionRequest) (chat.ToolExecutionResult, error) {
+	tool, server, secret, err := s.repo.GetToolForExecution(ctx, request.WorkspaceID, request.ToolID)
+	if err != nil {
+		return chat.ToolExecutionResult{}, err
+	}
+	if !server.Enabled || tool.PermissionMode == chat.ToolPermissionDeny {
+		return chat.ToolExecutionResult{}, ErrToolDenied
+	}
+	secret, err = s.decryptSecret(secret)
+	if err != nil {
+		return chat.ToolExecutionResult{}, err
+	}
+	timeout := request.Timeout
+	if timeout <= 0 {
+		timeout = time.Duration(server.RequestTimeoutMS) * time.Millisecond
+	}
+	toolCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := s.client.CallTool(toolCtx, server, secret, tool.Name, request.Arguments)
+	if err != nil {
+		return chat.ToolExecutionResult{}, err
+	}
+	text := result.Text
+	truncated := result.Truncated
+	if request.MaxResultBytes > 0 && len(text) > request.MaxResultBytes {
+		text = text[:request.MaxResultBytes] + "\n[Tool result truncated]"
+		truncated = true
+	}
+	return chat.ToolExecutionResult{Content: text, Truncated: truncated}, nil
+}
+
 func (s *Service) AllowedChatTools(ctx context.Context, workspaceID string) ([]providers.ChatTool, error) {
 	tools, err := s.repo.ListTools(ctx, workspaceID, "")
 	if err != nil {
@@ -195,6 +277,56 @@ func (s *Service) ExecuteAllowedTool(ctx context.Context, workspaceID string, na
 		return "", err
 	}
 	return result.Text, nil
+}
+
+func effectivePermission(item AgentTool, agentDefault string) string {
+	if item.GlobalPermission == chat.ToolPermissionDeny {
+		return chat.ToolPermissionDeny
+	}
+	if item.AgentPermission != "" {
+		if item.AgentPermission == chat.ToolPermissionDeny {
+			return chat.ToolPermissionDeny
+		}
+		return item.AgentPermission
+	}
+	if item.AgentApprovalPersisted || item.ConversationApproved {
+		return chat.ToolPermissionAllow
+	}
+	if agentDefault != "" {
+		return agentDefault
+	}
+	if item.GlobalPermission != "" {
+		return item.GlobalPermission
+	}
+	return chat.ToolPermissionAsk
+}
+
+var providerToolNamePattern = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
+
+func providerToolName(serverName string, toolName string, toolID string) string {
+	base := strings.ToLower(strings.Trim(providerToolNamePattern.ReplaceAllString(serverName+"_"+toolName, "_"), "_"))
+	if base == "" {
+		base = "tool"
+	}
+	suffix := strings.ToLower(strings.TrimSpace(toolID))
+	if len(suffix) > 10 {
+		suffix = suffix[:10]
+	}
+	if suffix == "" {
+		suffix = "unknown"
+	}
+	name := "mcp_" + base + "_" + suffix
+	if len(name) > 64 {
+		keep := 64 - len("mcp__") - len(suffix)
+		if keep < 8 {
+			keep = 8
+		}
+		if len(base) > keep {
+			base = base[:keep]
+		}
+		name = "mcp_" + strings.Trim(base, "_") + "_" + suffix
+	}
+	return name
 }
 
 func (s *Service) normalizeInput(workspaceID string, input ServerInput) (Server, ServerSecret, error) {

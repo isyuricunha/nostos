@@ -55,6 +55,15 @@ type Tool struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+type AgentTool struct {
+	Tool                   Tool
+	Server                 Server
+	AgentPermission        string
+	GlobalPermission       string
+	ConversationApproved   bool
+	AgentApprovalPersisted bool
+}
+
 type DiscoveredTool struct {
 	Name        string
 	Description string

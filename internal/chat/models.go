@@ -101,13 +101,18 @@ type PrincipalContext struct {
 }
 
 type AgentContext struct {
-	ID                string
-	Name              string
-	SystemPrompt      string
-	DefaultProviderID string
-	DefaultModel      string
-	FallbackModel     string
-	MemoryAccessMode  string
+	ID                    string
+	Name                  string
+	Description           string
+	SystemPrompt          string
+	DefaultProviderID     string
+	DefaultModel          string
+	FallbackModel         string
+	Temperature           float64
+	MaxToolIterations     int
+	MemoryAccessMode      string
+	ToolPermissionDefault string
+	Active                bool
 }
 
 type MemoryRequest struct {
@@ -117,6 +122,98 @@ type MemoryRequest struct {
 	ConversationID string
 	AccessMode     string
 	Query          string
+}
+
+const (
+	ToolCallPending            = "pending"
+	ToolCallWaitingForApproval = "waiting_for_approval"
+	ToolCallApproved           = "approved"
+	ToolCallRunning            = "running"
+	ToolCallSucceeded          = "succeeded"
+	ToolCallDenied             = "denied"
+	ToolCallFailed             = "failed"
+	ToolCallCancelled          = "cancelled"
+	ToolCallTimedOut           = "timed_out"
+
+	ToolApprovalNotRequired = "not_required"
+	ToolApprovalPending     = "pending"
+	ToolApprovalApproved    = "approved"
+	ToolApprovalDenied      = "denied"
+
+	ToolPermissionDeny  = "deny"
+	ToolPermissionAsk   = "ask"
+	ToolPermissionAllow = "allow"
+
+	ToolDecisionApproveOnce         = "approve_once"
+	ToolDecisionApproveConversation = "approve_conversation"
+	ToolDecisionAllowAgent          = "allow_agent"
+	ToolDecisionDeny                = "deny"
+	ToolDecisionDenyDisableTool     = "deny_disable_tool"
+)
+
+type RuntimeTool struct {
+	ID             string
+	ServerID       string
+	Name           string
+	ProviderName   string
+	Description    string
+	InputSchema    string
+	PermissionMode string
+}
+
+type ToolExposureRequest struct {
+	WorkspaceID            string
+	AgentID                string
+	ConversationID         string
+	AgentDefaultPermission string
+}
+
+type ToolExecutionRequest struct {
+	WorkspaceID     string
+	ToolID          string
+	Arguments       string
+	Timeout         time.Duration
+	MaxResultBytes  int
+	ProviderName    string
+	ToolDisplayName string
+}
+
+type ToolExecutionResult struct {
+	Content   string
+	Truncated bool
+}
+
+type ToolCallRecord struct {
+	ID                 string     `json:"id"`
+	ChatRunID          string     `json:"chat_run_id"`
+	MessageID          string     `json:"message_id,omitempty"`
+	ToolID             string     `json:"tool_id,omitempty"`
+	ProviderToolCallID string     `json:"provider_tool_call_id,omitempty"`
+	ProviderName       string     `json:"provider_name,omitempty"`
+	Name               string     `json:"name"`
+	Input              string     `json:"input"`
+	Output             string     `json:"output,omitempty"`
+	OutputTruncated    bool       `json:"output_truncated"`
+	State              string     `json:"state"`
+	ApprovalState      string     `json:"approval_state"`
+	ErrorCode          string     `json:"error_code,omitempty"`
+	ErrorMessage       string     `json:"error_message,omitempty"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+type ToolApprovalRecord struct {
+	ID             string    `json:"id"`
+	WorkspaceID    string    `json:"workspace_id"`
+	ToolCallID     string    `json:"tool_call_id,omitempty"`
+	ToolID         string    `json:"tool_id,omitempty"`
+	AgentID        string    `json:"agent_id,omitempty"`
+	ConversationID string    `json:"conversation_id,omitempty"`
+	ActorUserID    string    `json:"actor_user_id,omitempty"`
+	Decision       string    `json:"decision"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type MemorySnippet struct {

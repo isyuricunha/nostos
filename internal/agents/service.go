@@ -79,16 +79,21 @@ func (s *Service) GetChatAgent(ctx context.Context, workspaceID string, agentID 
 		return chat.AgentContext{}, err
 	}
 	if !agent.Active {
-		return chat.AgentContext{}, nil
+		return chat.AgentContext{}, fmt.Errorf("%w: agent is disabled", ErrInvalidInput)
 	}
 	return chat.AgentContext{
-		ID:                agent.ID,
-		Name:              agent.Name,
-		SystemPrompt:      agent.SystemPrompt,
-		DefaultProviderID: agent.DefaultProviderID,
-		DefaultModel:      agent.DefaultModel,
-		FallbackModel:     agent.FallbackModel,
-		MemoryAccessMode:  agent.MemoryAccessMode,
+		ID:                    agent.ID,
+		Name:                  agent.Name,
+		Description:           agent.Description,
+		SystemPrompt:          agent.SystemPrompt,
+		DefaultProviderID:     agent.DefaultProviderID,
+		DefaultModel:          agent.DefaultModel,
+		FallbackModel:         agent.FallbackModel,
+		Temperature:           agent.Temperature,
+		MaxToolIterations:     agent.MaxToolIterations,
+		MemoryAccessMode:      agent.MemoryAccessMode,
+		ToolPermissionDefault: agent.ToolPermissionDefault,
+		Active:                agent.Active,
 	}, nil
 }
 

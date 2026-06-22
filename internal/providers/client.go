@@ -37,11 +37,12 @@ type ToolCallFunction struct {
 }
 
 type StreamRequest struct {
-	Provider Provider
-	APIKey   string
-	Model    string
-	Messages []ChatMessage
-	Tools    []ChatTool
+	Provider    Provider
+	APIKey      string
+	Model       string
+	Messages    []ChatMessage
+	Tools       []ChatTool
+	Temperature float64
 }
 
 type ChatTool struct {
@@ -129,6 +130,9 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, request StreamRequest) (<
 	}
 	if len(request.Tools) > 0 {
 		body["tools"] = request.Tools
+	}
+	if request.Temperature > 0 {
+		body["temperature"] = request.Temperature
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {

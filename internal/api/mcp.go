@@ -26,6 +26,9 @@ func (h *mcpHandler) Routes(r chi.Router) {
 	r.Post("/mcp-servers/{serverID}/discover", h.discoverTools)
 	r.Get("/mcp-tools", h.listTools)
 	r.Put("/mcp-tools/{toolID}/permission", h.updateToolPermission)
+	r.Get("/agents/{agentID}/mcp-servers", h.listAgentServerAssignments)
+	r.Put("/agents/{agentID}/mcp-servers", h.assignAgentServers)
+	r.Put("/agents/{agentID}/mcp-tools/{toolID}/permission", h.updateAgentToolPermission)
 }
 
 func (h *mcpHandler) listServers(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +100,44 @@ func (h *mcpHandler) updateToolPermission(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := h.service.UpdateToolPermission(r.Context(), mcpPrincipal(r), chi.URLParam(r, "toolID"), input.PermissionMode); err != nil {
+		h.writeMCPError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *mcpHandler) listAgentServerAssignments(w http.ResponseWriter, r *http.Request) {
+	ids, err := h.service.ListAgentServerAssignments(r.Context(), mcpPrincipal(r), chi.URLParam(r, "agentID"))
+	if err != nil {
+		h.writeMCPError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"server_ids": ids})
+}
+
+func (h *mcpHandler) assignAgentServers(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ServerIDs []string `json:"server_ids"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if err := h.service.AssignAgentServers(r.Context(), mcpPrincipal(r), chi.URLParam(r, "agentID"), input.ServerIDs); err != nil {
+		h.writeMCPError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *mcpHandler) updateAgentToolPermission(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		PermissionMode string `json:"permission_mode"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	principal := mcpPrincipal(r)
+	if err := h.service.SetAgentToolPermission(r.Context(), principal.WorkspaceID, chi.URLParam(r, "agentID"), chi.URLParam(r, "toolID"), input.PermissionMode); err != nil {
 		h.writeMCPError(w, r, err)
 		return
 	}

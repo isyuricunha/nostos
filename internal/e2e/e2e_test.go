@@ -245,6 +245,8 @@ func TestOwnerWorkspaceFlow(t *testing.T) {
 		t.Fatalf("tool discovery failed: %#v", toolsResp.Tools)
 	}
 	requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/mcp-tools/"+toolsResp.Tools[0].ID+"/permission", map[string]any{"permission_mode": "allow"}, nil)
+	requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/agents/"+agentResp.Agent.ID+"/mcp-servers", map[string]any{"server_ids": []string{mcpResp.Server.ID}}, nil)
+	requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/agents/"+agentResp.Agent.ID+"/mcp-tools/"+toolsResp.Tools[0].ID+"/permission", map[string]any{"permission_mode": "allow"}, nil)
 	toolEvents := requestStream(t, client, server.URL+"/api/v1/conversations/"+conversationResp.Conversation.ID+"/runs", map[string]any{
 		"content":     "Use the status tool",
 		"provider_id": providerResp.Provider.ID,
@@ -402,7 +404,7 @@ func newMockProvider(t *testing.T) *httptest.Server {
 				lastContent = body.Messages[len(body.Messages)-1].Content
 			}
 			if len(body.Tools) > 0 && strings.Contains(lastContent, "status tool") {
-				fmt.Fprintln(w, `data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup_status","arguments":"{\"service\":\"api\"}"}}]},"finish_reason":"tool_calls"}]}`)
+				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":%q,\"arguments\":\"{\\\"service\\\":\\\"api\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n", body.Tools[0].Function.Name)
 				fmt.Fprintln(w)
 				fmt.Fprintln(w, `data: [DONE]`)
 				return

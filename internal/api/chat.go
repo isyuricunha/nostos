@@ -32,6 +32,10 @@ func (h *chatHandler) Routes(r chi.Router) {
 		r.Delete("/summary", h.clearSummary)
 	})
 	r.Post("/chat-runs/{runID}/cancel", h.cancelRun)
+	r.Post("/chat-runs/{runID}/resume", h.resumeRun)
+	r.Get("/tool-approvals/pending", h.pendingToolApprovals)
+	r.Post("/tool-calls/{toolCallID}/approve", h.approveToolCall)
+	r.Post("/tool-calls/{toolCallID}/deny", h.denyToolCall)
 	r.Post("/messages/{messageID}/regenerate", h.regenerate)
 	r.Patch("/messages/{messageID}", h.editMessage)
 }
@@ -131,6 +135,51 @@ func (h *chatHandler) cancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *chatHandler) resumeRun(w http.ResponseWriter, r *http.Request) {
+	h.stream(w, r, func(sink chat.StreamSink) error {
+		return h.service.ResumeRun(r.Context(), chatPrincipal(r), chi.URLParam(r, "runID"), sink)
+	})
+}
+
+func (h *chatHandler) pendingToolApprovals(w http.ResponseWriter, r *http.Request) {
+	items, err := h.service.ListPendingToolApprovals(r.Context(), chatPrincipal(r))
+	if err != nil {
+		h.writeChatError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tool_calls": items})
+}
+
+func (h *chatHandler) approveToolCall(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Decision string `json:"decision"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	call, err := h.service.ApproveToolCall(r.Context(), chatPrincipal(r), chi.URLParam(r, "toolCallID"), input.Decision)
+	if err != nil {
+		h.writeChatError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tool_call": call})
+}
+
+func (h *chatHandler) denyToolCall(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Decision string `json:"decision"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	call, err := h.service.DenyToolCall(r.Context(), chatPrincipal(r), chi.URLParam(r, "toolCallID"), input.Decision)
+	if err != nil {
+		h.writeChatError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tool_call": call})
 }
 
 func (h *chatHandler) regenerate(w http.ResponseWriter, r *http.Request) {

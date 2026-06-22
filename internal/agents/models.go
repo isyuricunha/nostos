@@ -44,11 +44,16 @@ type PrincipalContext struct {
 }
 
 type ChatAgent struct {
-	ID                string
-	Name              string
-	SystemPrompt      string
-	DefaultProviderID string
-	DefaultModel      string
-	FallbackModel     string
-	MemoryAccessMode  string
+	ID                    string
+	Name                  string
+	Description           string
+	SystemPrompt          string
+	DefaultProviderID     string
+	DefaultModel          string
+	FallbackModel         string
+	Temperature           float64
+	MaxToolIterations     int
+	MemoryAccessMode      string
+	ToolPermissionDefault string
+	Active                bool
 }

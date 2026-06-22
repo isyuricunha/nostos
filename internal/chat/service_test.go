@@ -438,9 +438,17 @@ func TestRunExecutesAllowedToolAndStreamsFollowup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
+	agentID := "agent_test_tool"
+	now := store.NowArg(time.Now().UTC())
+	if _, err := store.DB.ExecContext(ctx, `INSERT INTO agents (id, workspace_id, name, system_prompt, default_provider_id, default_model, max_tool_iterations, memory_access_mode, tool_permission_default, active, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		agentID, user.WorkspaceID, "Tool Agent", "Use tools when helpful.", provider.ID, "mock-model", 4, "pinned_only", "ask", true, now, now); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
 	service := NewService(cfg, NewSQLRepository(store), providerService, providerClient, fakeAgentResolver{}, &fakeMemoryProvider{}).WithToolProvider(fakeToolProvider{})
 	conversation, err := service.CreateConversation(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, Conversation{
 		Title:      "Tool chat",
+		AgentID:    agentID,
 		ProviderID: provider.ID,
 		Model:      "mock-model",
 	})
@@ -462,11 +470,224 @@ func TestRunExecutesAllowedToolAndStreamsFollowup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}
-	if len(messages) != 2 || messages[1].Content != "The API is healthy." {
+	if len(messages) != 3 || messages[1].Content != "The API is healthy." || messages[2].Role != RoleTool || messages[2].Content != "api is healthy" {
 		t.Fatalf("assistant follow-up was not persisted: %#v", messages)
 	}
 	if !containsEvent(events, "tool_result") {
 		t.Fatalf("tool result event was not emitted: %#v", events)
+	}
+}
+
+func TestAskToolPausesApprovesOnceAndResumes(t *testing.T) {
+	ctx := context.Background()
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		requestCount++
+		var body struct {
+			Messages []providers.ChatMessage `json:"messages"`
+			Tools    []providers.ChatTool    `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requestCount == 1 {
+			if len(body.Tools) != 1 {
+				t.Fatalf("ask tool was not exposed to provider: %#v", body.Tools)
+			}
+			fmt.Fprintln(w, `data: {"choices":[{"delta":{"tool_calls":[{"id":"call_ask","type":"function","function":{"name":"lookup_status","arguments":"{\"service\":\"api\"}"}}]},"finish_reason":"tool_calls"}]}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: [DONE]`)
+			return
+		}
+		hasToolResult := false
+		for _, message := range body.Messages {
+			if message.Role == RoleTool && message.ToolCallID == "call_ask" && message.Content == "api is healthy" {
+				hasToolResult = true
+			}
+		}
+		if !hasToolResult {
+			t.Fatalf("approved tool result was not sent on resume: %#v", body.Messages)
+		}
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"Resumed with tool result."}}]}`)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newChatTestContext(t)
+	defer cleanup()
+	authRepo := auth.NewSQLRepository(store)
+	providerClient := providers.NewOpenAIClient()
+	providerService := providers.NewService(cfg, providers.NewSQLRepository(store), authRepo, providerClient)
+	apiKey := "test-api-key"
+	provider, err := providerService.Create(ctx, providers.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, providers.ProviderInput{
+		Name:             "Mock",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	agentID := seedChatAgent(t, ctx, store, user.WorkspaceID, provider.ID)
+	executions := 0
+	service := NewService(cfg, NewSQLRepository(store), providerService, providerClient, fakeAgentResolver{}, &fakeMemoryProvider{}).
+		WithToolProvider(&fakeToolProvider{permission: ToolPermissionAsk, executions: &executions})
+	conversation, err := service.CreateConversation(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, Conversation{
+		Title:      "Approval chat",
+		AgentID:    agentID,
+		ProviderID: provider.ID,
+		Model:      "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	var runID string
+	var events []string
+	if err := service.Run(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, conversation.ID, RunInput{Content: "Check status with approval"}, func(event string, payload any) error {
+		events = append(events, event)
+		if event == "run_started" {
+			data, ok := payload.(map[string]any)
+			if !ok {
+				t.Fatalf("unexpected run_started payload: %#v", payload)
+			}
+			run, ok := data["run"].(ChatRun)
+			if !ok {
+				t.Fatalf("unexpected run payload: %#v", data["run"])
+			}
+			runID = run.ID
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("run chat: %v", err)
+	}
+	if !containsEvent(events, "tool_approval_required") || requestCount != 1 || executions != 0 {
+		t.Fatalf("run did not pause for approval events=%#v requests=%d executions=%d", events, requestCount, executions)
+	}
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	pending, err := service.ListPendingToolApprovals(ctx, principal)
+	if err != nil {
+		t.Fatalf("list pending approvals: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ChatRunID != runID || pending[0].State != ToolCallWaitingForApproval {
+		t.Fatalf("unexpected pending approvals: %#v", pending)
+	}
+	if _, err := service.ApproveToolCall(ctx, principal, pending[0].ID, ToolDecisionApproveOnce); err != nil {
+		t.Fatalf("approve tool: %v", err)
+	}
+	var resumeEvents []string
+	if err := service.ResumeRun(ctx, principal, runID, func(event string, payload any) error {
+		resumeEvents = append(resumeEvents, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("resume run: %v", err)
+	}
+	if executions != 1 || requestCount != 2 || !containsEvent(resumeEvents, "run_completed") {
+		t.Fatalf("resume did not execute exactly once requests=%d executions=%d events=%#v", requestCount, executions, resumeEvents)
+	}
+	remaining, err := service.ListPendingToolApprovals(ctx, principal)
+	if err != nil {
+		t.Fatalf("list remaining approvals: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("approval remained pending: %#v", remaining)
+	}
+}
+
+func TestToolLoopSupportsMultipleIterations(t *testing.T) {
+	ctx := context.Background()
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		requestCount++
+		var body struct {
+			Messages []providers.ChatMessage `json:"messages"`
+			Tools    []providers.ChatTool    `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if len(body.Tools) != 1 {
+			t.Fatalf("tool definitions were not preserved on iteration %d: %#v", requestCount, body.Tools)
+		}
+		switch requestCount {
+		case 1:
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":%q,\"arguments\":\"{\\\"service\\\":\\\"api\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n", body.Tools[0].Function.Name)
+			fmt.Fprintln(w, `data: [DONE]`)
+		case 2:
+			if !providerMessagesIncludeToolResult(body.Messages, "call_1", "api is healthy") {
+				t.Fatalf("first tool result missing from second request: %#v", body.Messages)
+			}
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":%q,\"arguments\":\"{\\\"service\\\":\\\"api\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n", body.Tools[0].Function.Name)
+			fmt.Fprintln(w, `data: [DONE]`)
+		case 3:
+			if !providerMessagesIncludeToolResult(body.Messages, "call_1", "api is healthy") || !providerMessagesIncludeToolResult(body.Messages, "call_2", "api is healthy") {
+				t.Fatalf("tool results missing from final request: %#v", body.Messages)
+			}
+			fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"Both checks passed."}}]}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: [DONE]`)
+		default:
+			t.Fatalf("unexpected provider request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newChatTestContext(t)
+	defer cleanup()
+	authRepo := auth.NewSQLRepository(store)
+	providerClient := providers.NewOpenAIClient()
+	providerService := providers.NewService(cfg, providers.NewSQLRepository(store), authRepo, providerClient)
+	apiKey := "test-api-key"
+	provider, err := providerService.Create(ctx, providers.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, providers.ProviderInput{
+		Name:             "Mock",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	agentID := seedChatAgent(t, ctx, store, user.WorkspaceID, provider.ID)
+	executions := 0
+	service := NewService(cfg, NewSQLRepository(store), providerService, providerClient, fakeAgentResolver{}, &fakeMemoryProvider{}).
+		WithToolProvider(&fakeToolProvider{permission: ToolPermissionAllow, executions: &executions})
+	conversation, err := service.CreateConversation(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, Conversation{
+		Title:      "Loop chat",
+		AgentID:    agentID,
+		ProviderID: provider.ID,
+		Model:      "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	var events []string
+	if err := service.Run(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, conversation.ID, RunInput{Content: "Check twice"}, func(event string, payload any) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("run chat: %v", err)
+	}
+	if requestCount != 3 || executions != 2 || !containsEvent(events, "run_completed") {
+		t.Fatalf("multi-iteration tool loop failed requests=%d executions=%d events=%#v", requestCount, executions, events)
+	}
+	calls, err := NewSQLRepository(store).ListToolCallsForRun(ctx, latestRunID(t, ctx, store))
+	if err != nil {
+		t.Fatalf("list tool calls: %v", err)
+	}
+	if len(calls) != 2 || calls[0].State != ToolCallSucceeded || calls[1].State != ToolCallSucceeded {
+		t.Fatalf("tool calls were not persisted as succeeded: %#v", calls)
 	}
 }
 
@@ -520,6 +741,24 @@ func containsContentSubstring(messages []providers.ChatMessage, content string) 
 		}
 	}
 	return false
+}
+
+func providerMessagesIncludeToolResult(messages []providers.ChatMessage, toolCallID string, content string) bool {
+	for _, message := range messages {
+		if message.Role == RoleTool && message.ToolCallID == toolCallID && message.Content == content {
+			return true
+		}
+	}
+	return false
+}
+
+func latestRunID(t *testing.T, ctx context.Context, store *database.Store) string {
+	t.Helper()
+	var runID string
+	if err := store.DB.QueryRowContext(ctx, `SELECT id FROM chat_runs ORDER BY created_at DESC LIMIT 1`).Scan(&runID); err != nil {
+		t.Fatalf("read latest run: %v", err)
+	}
+	return runID
 }
 
 func anyRequestContains(requests [][]providers.ChatMessage, content string) bool {
@@ -580,9 +819,13 @@ type fakeAgentResolver struct{}
 
 func (fakeAgentResolver) GetChatAgent(ctx context.Context, workspaceID string, agentID string) (AgentContext, error) {
 	return AgentContext{
-		ID:               agentID,
-		SystemPrompt:     "Use the selected memories.",
-		MemoryAccessMode: "pinned_only",
+		ID:                    agentID,
+		SystemPrompt:          "Use the selected memories.",
+		MemoryAccessMode:      "pinned_only",
+		ToolPermissionDefault: "ask",
+		MaxToolIterations:     4,
+		Temperature:           0.7,
+		Active:                true,
 	}, nil
 }
 
@@ -592,24 +835,43 @@ type fakeMemoryProvider struct {
 	recorded      []MemorySnippet
 }
 
-type fakeToolProvider struct{}
+type fakeToolProvider struct {
+	permission string
+	executions *int
+}
 
-func (fakeToolProvider) AllowedChatTools(ctx context.Context, workspaceID string) ([]providers.ChatTool, error) {
-	return []providers.ChatTool{{
-		Type: "function",
-		Function: providers.ChatToolFunction{
-			Name:        "lookup_status",
-			Description: "Look up service status.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"service":{"type":"string"}}}`),
-		},
+func (f fakeToolProvider) RuntimeTools(ctx context.Context, request ToolExposureRequest) ([]RuntimeTool, error) {
+	mode := f.permission
+	if mode == "" {
+		mode = ToolPermissionAllow
+	}
+	return []RuntimeTool{{
+		ID:             "",
+		ServerID:       "server_1",
+		Name:           "lookup_status",
+		ProviderName:   "lookup_status",
+		Description:    "Look up service status.",
+		InputSchema:    `{"type":"object","properties":{"service":{"type":"string"}}}`,
+		PermissionMode: mode,
 	}}, nil
 }
 
-func (fakeToolProvider) ExecuteAllowedTool(ctx context.Context, workspaceID string, name string, arguments string) (string, error) {
-	if name != "lookup_status" || arguments != `{"service":"api"}` {
-		return "", fmt.Errorf("unexpected tool call %s %s", name, arguments)
+func (f fakeToolProvider) ExecuteRuntimeTool(ctx context.Context, request ToolExecutionRequest) (ToolExecutionResult, error) {
+	if request.ProviderName != "lookup_status" || request.Arguments != `{"service":"api"}` {
+		return ToolExecutionResult{}, fmt.Errorf("unexpected tool call %s %s", request.ProviderName, request.Arguments)
 	}
-	return "api is healthy", nil
+	if f.executions != nil {
+		*f.executions++
+	}
+	return ToolExecutionResult{Content: "api is healthy"}, nil
+}
+
+func (fakeToolProvider) SetAgentToolPermission(ctx context.Context, workspaceID string, agentID string, toolID string, mode string) error {
+	return nil
+}
+
+func (fakeToolProvider) DisableTool(ctx context.Context, workspaceID string, toolID string) error {
+	return nil
 }
 
 func containsEvent(events []string, expected string) bool {
@@ -629,6 +891,22 @@ func (f *fakeMemoryProvider) RecordRunMemories(ctx context.Context, runID string
 	f.recordedRunID = runID
 	f.recorded = memories
 	return nil
+}
+
+func (f *fakeMemoryProvider) UsedByRun(ctx context.Context, runID string) ([]MemorySnippet, error) {
+	return f.recorded, nil
+}
+
+func seedChatAgent(t *testing.T, ctx context.Context, store *database.Store, workspaceID string, providerID string) string {
+	t.Helper()
+	agentID := "agent_test_tool_" + strings.ReplaceAll(providerID, "-", "_")
+	now := store.NowArg(time.Now().UTC())
+	if _, err := store.DB.ExecContext(ctx, `INSERT INTO agents (id, workspace_id, name, system_prompt, default_provider_id, default_model, max_tool_iterations, memory_access_mode, tool_permission_default, active, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		agentID, workspaceID, "Tool Agent", "Use tools when helpful.", providerID, "mock-model", 4, "pinned_only", "ask", true, now, now); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	return agentID
 }
 
 func newChatTestContext(t *testing.T) (config.Config, *database.Store, auth.User, func()) {

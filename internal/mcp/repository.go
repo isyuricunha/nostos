@@ -23,7 +23,12 @@ type Repository interface {
 	DeleteServer(ctx context.Context, workspaceID string, serverID string) error
 	ReplaceTools(ctx context.Context, serverID string, tools []DiscoveredTool) ([]Tool, error)
 	ListTools(ctx context.Context, workspaceID string, serverID string) ([]Tool, error)
+	ListAgentTools(ctx context.Context, workspaceID string, agentID string, conversationID string) ([]AgentTool, error)
+	GetToolForExecution(ctx context.Context, workspaceID string, toolID string) (Tool, Server, ServerSecret, error)
 	UpdateToolPermission(ctx context.Context, workspaceID string, toolID string, mode string) error
+	UpsertAgentToolPermission(ctx context.Context, workspaceID string, agentID string, toolID string, mode string) error
+	ReplaceAgentServerAssignments(ctx context.Context, workspaceID string, agentID string, serverIDs []string) error
+	ListAgentServerAssignments(ctx context.Context, workspaceID string, agentID string) ([]string, error)
 	UpdateServerHealth(ctx context.Context, workspaceID string, serverID string, status string, lastError string, connectedAt *time.Time) error
 }
 
@@ -197,11 +202,125 @@ FROM mcp_tools t JOIN mcp_servers s ON s.id = t.server_id WHERE s.workspace_id =
 	return tools, rows.Err()
 }
 
+func (r *SQLRepository) ListAgentTools(ctx context.Context, workspaceID string, agentID string, conversationID string) ([]AgentTool, error) {
+	if strings.TrimSpace(agentID) == "" {
+		return nil, nil
+	}
+	query := `SELECT t.id, t.server_id, t.name, t.description, t.input_schema, t.permission_mode, t.discovered_at, t.updated_at,
+s.id, s.workspace_id, s.name, s.description, s.transport_type, s.command, s.arguments, s.working_directory, s.encrypted_environment,
+s.http_url, s.encrypted_http_headers, s.enabled, s.startup_timeout_ms, s.request_timeout_ms, s.health_status, s.last_error, s.last_connected_at, s.created_at, s.updated_at,
+COALESCE(atp.permission_mode, '') AS agent_permission,
+EXISTS (SELECT 1 FROM tool_approvals ta WHERE ta.workspace_id = ` + r.store.Placeholder(1) + ` AND ta.tool_id = t.id AND ta.conversation_id = ` + r.store.Placeholder(2) + ` AND ta.decision = 'approve_conversation') AS conversation_approved,
+EXISTS (SELECT 1 FROM tool_approvals ta WHERE ta.workspace_id = ` + r.store.Placeholder(3) + ` AND ta.tool_id = t.id AND ta.agent_id = ` + r.store.Placeholder(4) + ` AND ta.decision = 'allow_agent') AS agent_approval
+FROM agent_mcp_servers ams
+JOIN mcp_servers s ON s.id = ams.server_id
+JOIN mcp_tools t ON t.server_id = s.id
+LEFT JOIN agent_tool_permissions atp ON atp.agent_id = ams.agent_id AND atp.tool_id = t.id
+WHERE ams.agent_id = ` + r.store.Placeholder(5) + ` AND s.workspace_id = ` + r.store.Placeholder(6) + ` AND s.enabled = ` + r.store.Placeholder(7) + `
+ORDER BY s.name, t.name`
+	rows, err := r.store.DB.QueryContext(ctx, query, workspaceID, conversationID, workspaceID, agentID, agentID, workspaceID, true)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AgentTool
+	for rows.Next() {
+		var item AgentTool
+		var agentPermission sql.NullString
+		tool, server, err := scanAgentToolRow(rows, &agentPermission, &item.ConversationApproved, &item.AgentApprovalPersisted)
+		if err != nil {
+			return nil, err
+		}
+		item.Tool = tool
+		item.Server = server
+		item.AgentPermission = agentPermission.String
+		item.GlobalPermission = tool.PermissionMode
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *SQLRepository) GetToolForExecution(ctx context.Context, workspaceID string, toolID string) (Tool, Server, ServerSecret, error) {
+	query := `SELECT t.id, t.server_id, t.name, t.description, t.input_schema, t.permission_mode, t.discovered_at, t.updated_at,
+s.id, s.workspace_id, s.name, s.description, s.transport_type, s.command, s.arguments, s.working_directory, s.encrypted_environment,
+s.http_url, s.encrypted_http_headers, s.enabled, s.startup_timeout_ms, s.request_timeout_ms, s.health_status, s.last_error, s.last_connected_at, s.created_at, s.updated_at
+FROM mcp_tools t JOIN mcp_servers s ON s.id = t.server_id
+WHERE s.workspace_id = ` + r.store.Placeholder(1) + ` AND t.id = ` + r.store.Placeholder(2)
+	var tool Tool
+	var server Server
+	var secret ServerSecret
+	err := scanToolServerSecretRow(r.store.DB.QueryRowContext(ctx, query, workspaceID, toolID), &tool, &server, &secret)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Tool{}, Server{}, ServerSecret{}, ErrNotFound
+	}
+	return tool, server, secret, err
+}
+
 func (r *SQLRepository) UpdateToolPermission(ctx context.Context, workspaceID string, toolID string, mode string) error {
 	query := `UPDATE mcp_tools SET permission_mode = ` + r.store.Placeholder(1) + `, updated_at = ` + r.store.Placeholder(2) +
 		` WHERE id = ` + r.store.Placeholder(3) + ` AND server_id IN (SELECT id FROM mcp_servers WHERE workspace_id = ` + r.store.Placeholder(4) + `)`
 	_, err := r.store.DB.ExecContext(ctx, query, mode, r.store.NowArg(time.Now().UTC()), toolID, workspaceID)
 	return err
+}
+
+func (r *SQLRepository) UpsertAgentToolPermission(ctx context.Context, workspaceID string, agentID string, toolID string, mode string) error {
+	now := time.Now().UTC()
+	query := `INSERT INTO agent_tool_permissions (id, agent_id, tool_id, permission_mode, created_at, updated_at)
+SELECT ` + r.store.Placeholder(1) + `, ` + r.store.Placeholder(2) + `, ` + r.store.Placeholder(3) + `, ` + r.store.Placeholder(4) + `, ` + r.store.Placeholder(5) + `, ` + r.store.Placeholder(6) + `
+WHERE EXISTS (SELECT 1 FROM agents WHERE id = ` + r.store.Placeholder(7) + ` AND workspace_id = ` + r.store.Placeholder(8) + `)
+AND EXISTS (SELECT 1 FROM mcp_tools t JOIN mcp_servers s ON s.id = t.server_id WHERE t.id = ` + r.store.Placeholder(9) + ` AND s.workspace_id = ` + r.store.Placeholder(10) + `)
+ON CONFLICT(agent_id, tool_id) DO UPDATE SET permission_mode = excluded.permission_mode, updated_at = excluded.updated_at`
+	_, err := r.store.DB.ExecContext(ctx, query, id.New(), agentID, toolID, mode, r.store.NowArg(now), r.store.NowArg(now), agentID, workspaceID, toolID, workspaceID)
+	return err
+}
+
+func (r *SQLRepository) ReplaceAgentServerAssignments(ctx context.Context, workspaceID string, agentID string, serverIDs []string) error {
+	tx, err := r.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	deleteQuery := `DELETE FROM agent_mcp_servers WHERE agent_id = ` + r.store.Placeholder(1) +
+		` AND agent_id IN (SELECT id FROM agents WHERE workspace_id = ` + r.store.Placeholder(2) + `)`
+	if _, err := tx.ExecContext(ctx, deleteQuery, agentID, workspaceID); err != nil {
+		return err
+	}
+	for _, serverID := range serverIDs {
+		if strings.TrimSpace(serverID) == "" {
+			continue
+		}
+		query := `INSERT INTO agent_mcp_servers (agent_id, server_id, created_at)
+SELECT ` + r.store.Placeholder(1) + `, ` + r.store.Placeholder(2) + `, ` + r.store.Placeholder(3) + `
+WHERE EXISTS (SELECT 1 FROM agents WHERE id = ` + r.store.Placeholder(4) + ` AND workspace_id = ` + r.store.Placeholder(5) + `)
+AND EXISTS (SELECT 1 FROM mcp_servers WHERE id = ` + r.store.Placeholder(6) + ` AND workspace_id = ` + r.store.Placeholder(7) + `)
+ON CONFLICT(agent_id, server_id) DO NOTHING`
+		if _, err := tx.ExecContext(ctx, query, agentID, serverID, r.store.NowArg(time.Now().UTC()), agentID, workspaceID, serverID, workspaceID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (r *SQLRepository) ListAgentServerAssignments(ctx context.Context, workspaceID string, agentID string) ([]string, error) {
+	query := `SELECT ams.server_id FROM agent_mcp_servers ams
+JOIN agents a ON a.id = ams.agent_id
+JOIN mcp_servers s ON s.id = ams.server_id
+WHERE a.workspace_id = ` + r.store.Placeholder(1) + ` AND s.workspace_id = ` + r.store.Placeholder(2) + ` AND ams.agent_id = ` + r.store.Placeholder(3) + `
+ORDER BY s.name`
+	rows, err := r.store.DB.QueryContext(ctx, query, workspaceID, workspaceID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var serverID string
+		if err := rows.Scan(&serverID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, serverID)
+	}
+	return ids, rows.Err()
 }
 
 func (r *SQLRepository) UpdateServerHealth(ctx context.Context, workspaceID string, serverID string, status string, lastError string, connectedAt *time.Time) error {
@@ -270,6 +389,101 @@ func scanTool(row rowScanner) (Tool, error) {
 		return Tool{}, err
 	}
 	return tool, nil
+}
+
+func scanAgentToolRow(row rowScanner, agentPermission *sql.NullString, conversationApproved *bool, agentApprovalPersisted *bool) (Tool, Server, error) {
+	var tool Tool
+	var server Server
+	var command sql.NullString
+	var argsRaw string
+	var workingDir sql.NullString
+	var envRaw string
+	var httpURL sql.NullString
+	var headersRaw string
+	var lastError sql.NullString
+	var toolDiscoveredRaw any
+	var toolUpdatedRaw any
+	var serverConnectedRaw any
+	var serverCreatedRaw any
+	var serverUpdatedRaw any
+	if err := row.Scan(&tool.ID, &tool.ServerID, &tool.Name, &tool.Description, &tool.InputSchema, &tool.PermissionMode, &toolDiscoveredRaw, &toolUpdatedRaw,
+		&server.ID, &server.WorkspaceID, &server.Name, &server.Description, &server.TransportType, &command, &argsRaw, &workingDir, &envRaw,
+		&httpURL, &headersRaw, &server.Enabled, &server.StartupTimeoutMS, &server.RequestTimeoutMS, &server.HealthStatus, &lastError, &serverConnectedRaw,
+		&serverCreatedRaw, &serverUpdatedRaw, agentPermission, conversationApproved, agentApprovalPersisted); err != nil {
+		return Tool{}, Server{}, err
+	}
+	var err error
+	tool.DiscoveredAt, err = database.ParseTime(toolDiscoveredRaw)
+	if err != nil {
+		return Tool{}, Server{}, err
+	}
+	tool.UpdatedAt, err = database.ParseTime(toolUpdatedRaw)
+	if err != nil {
+		return Tool{}, Server{}, err
+	}
+	hydrateServerSecrets(&server, ServerSecret{Environment: parseMap(envRaw), HTTPHeaders: parseMap(headersRaw)}, command, argsRaw, workingDir, httpURL, lastError)
+	server.LastConnectedAt, err = nullableTime(serverConnectedRaw)
+	if err != nil {
+		return Tool{}, Server{}, err
+	}
+	server.CreatedAt, err = database.ParseTime(serverCreatedRaw)
+	if err != nil {
+		return Tool{}, Server{}, err
+	}
+	server.UpdatedAt, err = database.ParseTime(serverUpdatedRaw)
+	return tool, server, err
+}
+
+func scanToolServerSecretRow(row rowScanner, tool *Tool, server *Server, secret *ServerSecret) error {
+	var command sql.NullString
+	var argsRaw string
+	var workingDir sql.NullString
+	var envRaw string
+	var httpURL sql.NullString
+	var headersRaw string
+	var lastError sql.NullString
+	var toolDiscoveredRaw any
+	var toolUpdatedRaw any
+	var serverConnectedRaw any
+	var serverCreatedRaw any
+	var serverUpdatedRaw any
+	if err := row.Scan(&tool.ID, &tool.ServerID, &tool.Name, &tool.Description, &tool.InputSchema, &tool.PermissionMode, &toolDiscoveredRaw, &toolUpdatedRaw,
+		&server.ID, &server.WorkspaceID, &server.Name, &server.Description, &server.TransportType, &command, &argsRaw, &workingDir, &envRaw,
+		&httpURL, &headersRaw, &server.Enabled, &server.StartupTimeoutMS, &server.RequestTimeoutMS, &server.HealthStatus, &lastError, &serverConnectedRaw,
+		&serverCreatedRaw, &serverUpdatedRaw); err != nil {
+		return err
+	}
+	var err error
+	tool.DiscoveredAt, err = database.ParseTime(toolDiscoveredRaw)
+	if err != nil {
+		return err
+	}
+	tool.UpdatedAt, err = database.ParseTime(toolUpdatedRaw)
+	if err != nil {
+		return err
+	}
+	*secret = ServerSecret{Environment: parseMap(envRaw), HTTPHeaders: parseMap(headersRaw)}
+	hydrateServerSecrets(server, *secret, command, argsRaw, workingDir, httpURL, lastError)
+	server.LastConnectedAt, err = nullableTime(serverConnectedRaw)
+	if err != nil {
+		return err
+	}
+	server.CreatedAt, err = database.ParseTime(serverCreatedRaw)
+	if err != nil {
+		return err
+	}
+	server.UpdatedAt, err = database.ParseTime(serverUpdatedRaw)
+	return err
+}
+
+func hydrateServerSecrets(server *Server, secret ServerSecret, command sql.NullString, argsRaw string, workingDir sql.NullString, httpURL sql.NullString, lastError sql.NullString) {
+	server.Command = command.String
+	server.Arguments = parseArray(argsRaw)
+	server.WorkingDirectory = workingDir.String
+	server.EnvironmentKeys = mapKeys(secret.Environment)
+	server.HTTPURL = httpURL.String
+	server.HTTPHeaderKeys = mapKeys(secret.HTTPHeaders)
+	server.LastError = lastError.String
 }
 
 type rowScanner interface {
