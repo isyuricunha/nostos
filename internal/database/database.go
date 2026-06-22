@@ -229,10 +229,11 @@ func ensureMigrationsTable(ctx context.Context, store *Store) error {
 
 func migrationApplied(ctx context.Context, store *Store, version string) (bool, error) {
 	var existing string
-	err := store.DB.QueryRowContext(ctx, "SELECT version FROM schema_migrations WHERE version = ?", version).Scan(&existing)
+	query := "SELECT version FROM schema_migrations WHERE version = ?"
 	if store.Dialect == Postgres {
-		err = store.DB.QueryRowContext(ctx, "SELECT version FROM schema_migrations WHERE version = $1", version).Scan(&existing)
+		query = "SELECT version FROM schema_migrations WHERE version = $1"
 	}
+	err := store.DB.QueryRowContext(ctx, query, version).Scan(&existing)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
