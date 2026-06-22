@@ -1,3 +1,5 @@
+import { mount } from 'svelte';
+
 import './styles.css';
 import App from './App.svelte';
 
@@ -7,7 +9,7 @@ if (!target) {
   throw new Error('Application target element was not found.');
 }
 
-const app = new App({
+const app = mount(App, {
   target
 });
 

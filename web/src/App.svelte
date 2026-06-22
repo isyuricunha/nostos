@@ -217,7 +217,7 @@
 
   async function refreshSessions(): Promise<void> {
     const response = await getJSON<SessionsResponse>('/api/v1/sessions');
-    sessions = response.sessions;
+    sessions = response.sessions ?? [];
   }
 
   async function refreshDiagnostics(): Promise<void> {
@@ -320,7 +320,7 @@
 
   async function refreshProviders(): Promise<void> {
     const response = await getJSON<ProvidersResponse>('/api/v1/providers');
-    providers = response.providers;
+    providers = response.providers ?? [];
     if (!selectedProviderId && providers.length > 0) {
       selectedProviderId = providers[0].id;
       selectedModel = providers[0].default_model ?? '';
@@ -334,7 +334,7 @@
       return;
     }
     const response = await getJSON<ModelsResponse>(`/api/v1/providers/${providerId}/models`);
-    providerModels = response.models;
+    providerModels = response.models ?? [];
     if (!selectedModel && providerModels.length > 0) {
       selectedModel = providerModels[0].model_id;
     }
@@ -448,10 +448,10 @@
     errorMessage = '';
     try {
       const response = await postJSON<ModelsResponse>(`/api/v1/providers/${providerId}/models/refresh`);
-      providerModels = response.models;
+      providerModels = response.models ?? [];
       selectedProviderId = providerId;
-      if (response.models.length > 0) {
-        selectedModel = response.models[0].model_id;
+      if (providerModels.length > 0) {
+        selectedModel = providerModels[0].model_id;
       }
       await refreshProviders();
       notice = 'Models refreshed.';
@@ -464,7 +464,7 @@
 
   async function refreshConversations(): Promise<void> {
     const response = await getJSON<ConversationsResponse>('/api/v1/conversations');
-    conversations = response.conversations;
+    conversations = response.conversations ?? [];
     if (!selectedConversationId && conversations.length > 0) {
       await selectConversation(conversations[0].id);
     }
@@ -484,7 +484,7 @@
   async function selectConversation(conversationId: string): Promise<void> {
     selectedConversationId = conversationId;
     const response = await getJSON<MessagesResponse>(`/api/v1/conversations/${conversationId}/messages`);
-    messages = response.messages;
+    messages = response.messages ?? [];
     await refreshFeedback(conversationId);
     const conversation = conversations.find((item) => item.id === conversationId);
     if (conversation) {
@@ -555,7 +555,7 @@
 
   async function refreshPendingToolApprovals(): Promise<void> {
     const response = await getJSON<ToolApprovalsResponse>('/api/v1/tool-approvals/pending');
-    pendingToolApprovals = response.tool_calls;
+    pendingToolApprovals = response.tool_calls ?? [];
   }
 
   async function approveToolCall(toolCall: ToolCall, decision: 'approve_once' | 'approve_conversation' | 'allow_agent'): Promise<void> {
@@ -648,7 +648,7 @@
 
   async function refreshAgents(): Promise<void> {
     const response = await getJSON<AgentsResponse>('/api/v1/agents');
-    agents = response.agents;
+    agents = response.agents ?? [];
     if (!selectedAgentId && agents.length > 0) {
       selectedAgentId = agents[0].id;
     }
@@ -729,7 +729,7 @@
 
   async function refreshMemories(): Promise<void> {
     const response = await getJSON<MemoriesResponse>('/api/v1/memories');
-    memories = response.memories;
+    memories = response.memories ?? [];
   }
 
   async function createMemory(): Promise<void> {
@@ -812,8 +812,8 @@
       getJSON<MCPServersResponse>('/api/v1/mcp-servers'),
       getJSON<MCPToolsResponse>('/api/v1/mcp-tools')
     ]);
-    mcpServers = serversResponse.servers;
-    mcpTools = toolsResponse.tools;
+    mcpServers = serversResponse.servers ?? [];
+    mcpTools = toolsResponse.tools ?? [];
   }
 
   async function createMCPServer(): Promise<void> {
@@ -894,7 +894,7 @@
 
   async function discoverMCPTools(serverId: string): Promise<void> {
     const response = await postJSON<MCPToolsResponse>(`/api/v1/mcp-servers/${serverId}/discover`);
-    mcpTools = [...response.tools, ...mcpTools.filter((tool) => tool.server_id !== serverId)];
+    mcpTools = [...(response.tools ?? []), ...mcpTools.filter((tool) => tool.server_id !== serverId)];
     await refreshMCP();
     notice = 'MCP tools discovered.';
   }
@@ -915,8 +915,8 @@
       getJSON<TasksResponse>('/api/v1/tasks'),
       getJSON<TaskRunsResponse>('/api/v1/task-runs')
     ]);
-    taskRecords = tasksResponse.tasks;
-    taskRuns = runsResponse.runs;
+    taskRecords = tasksResponse.tasks ?? [];
+    taskRuns = runsResponse.runs ?? [];
   }
 
   async function createTask(): Promise<void> {
@@ -1032,7 +1032,7 @@
 
   async function showTaskRunEvents(runId: string): Promise<void> {
     const response = await getJSON<TaskRunRecordResponse>(`/api/v1/task-runs/${runId}`);
-    taskRunEvents = response.events;
+    taskRunEvents = response.events ?? [];
   }
 
   function taskNameForRun(run: TaskRun): string {
@@ -1045,7 +1045,7 @@
       return;
     }
     const response = await getJSON<FeedbackListResponse>(`/api/v1/feedback?conversation_id=${conversationId}`);
-    feedbackByMessage = Object.fromEntries(response.feedback.map((item) => [item.message_id, item]));
+    feedbackByMessage = Object.fromEntries((response.feedback ?? []).map((item) => [item.message_id, item]));
   }
 
   async function refreshFeedbackStats(): Promise<void> {
@@ -1089,9 +1089,9 @@
 
   async function refreshReplyPresets(): Promise<void> {
     const response = await getJSON<ReplyPresetsResponse>('/api/v1/reply-presets');
-    replyPresets = response.presets;
+    replyPresets = response.presets ?? [];
     if (!selectedReplyPresetId) {
-      selectedReplyPresetId = response.presets.find((preset) => preset.active)?.id ?? '';
+      selectedReplyPresetId = replyPresets.find((preset) => preset.active)?.id ?? '';
     }
   }
 
