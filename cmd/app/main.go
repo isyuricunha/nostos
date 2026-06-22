@@ -13,10 +13,12 @@ import (
 
 	"github.com/yuricunha/nostos/internal/api"
 	"github.com/yuricunha/nostos/internal/auth"
+	"github.com/yuricunha/nostos/internal/chat"
 	"github.com/yuricunha/nostos/internal/config"
 	"github.com/yuricunha/nostos/internal/database"
 	"github.com/yuricunha/nostos/internal/health"
 	"github.com/yuricunha/nostos/internal/logging"
+	"github.com/yuricunha/nostos/internal/providers"
 	"github.com/yuricunha/nostos/internal/worker"
 )
 
@@ -71,6 +73,14 @@ func run(args []string) error {
 	}
 	authRepo := auth.NewSQLRepository(store)
 	authService := auth.NewService(authRepo, cfg)
+	providerRepo := providers.NewSQLRepository(store)
+	providerClient := providers.NewOpenAIClient()
+	providerService := providers.NewService(cfg, providerRepo, authRepo, providerClient)
+	chatRepo := chat.NewSQLRepository(store)
+	chatService := chat.NewService(cfg, chatRepo, providerService, providerClient)
+	if err := chatService.CleanupInterruptedRuns(ctx); err != nil {
+		return err
+	}
 	if bootstrapped, err := authService.BootstrapOwner(ctx); err != nil {
 		return err
 	} else if bootstrapped {
@@ -84,13 +94,21 @@ func run(args []string) error {
 	case "worker":
 		return runWorker(ctx, cfg, logger, store)
 	case "server":
-		return runServer(ctx, cfg, logger, store)
+		return runServer(ctx, cfg, logger, store, authService, providerService, chatService)
 	default:
 		return nil
 	}
 }
 
-func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, store *database.Store) error {
+func runServer(
+	ctx context.Context,
+	cfg config.Config,
+	logger *slog.Logger,
+	store *database.Store,
+	authService *auth.Service,
+	providerService *providers.Service,
+	chatService *chat.Service,
+) error {
 	healthService := health.NewService(store, version, buildCommit, buildTimestamp)
 	handler := api.NewRouter(api.RouterDeps{
 		Config: cfg,
@@ -98,8 +116,10 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, stor
 		Health: healthService,
 		Auth: api.AuthDeps{
 			Config: cfg,
-			Auth:   auth.NewService(auth.NewSQLRepository(store), cfg),
+			Auth:   authService,
 		},
+		Providers: providerService,
+		Chat:      chatService,
 	})
 
 	server := &http.Server{

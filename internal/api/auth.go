@@ -176,6 +176,10 @@ func (h *authHandler) requireAuth(next http.Handler) http.Handler {
 
 func (h *authHandler) requireCSRF(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
 		principal := Principal(r.Context())
 		token := r.Header.Get(auth.CSRFHeaderName)
 		if token == "" {

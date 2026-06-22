@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { deleteJSON, getJSON, postJSON } from './api';
+import { deleteJSON, getJSON, postJSON, postStream } from './api';
 
 describe('getJSON', () => {
   it('returns parsed JSON for successful responses', async () => {
@@ -52,5 +52,23 @@ describe('getJSON', () => {
       '/api/v1/sessions/session-id',
       expect.objectContaining({ method: 'DELETE' })
     );
+  });
+
+  it('parses server-sent events from streaming responses', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: content_delta\ndata: {"delta":"Hi"}\n\n'));
+        controller.close();
+      }
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }))
+    );
+    const events: string[] = [];
+
+    await postStream('/api/v1/conversations/id/runs', { content: 'Hello' }, (event) => events.push(event));
+
+    expect(events).toEqual(['content_delta']);
   });
 });

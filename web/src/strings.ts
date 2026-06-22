@@ -31,5 +31,21 @@ export const strings = {
     diagnostics: 'Diagnostics',
     emptyScreen: 'This screen is connected and ready for Version 0.1 data.',
     status: 'System status'
+  },
+  chat: {
+    newConversation: 'New conversation',
+    send: 'Send',
+    stop: 'Stop',
+    composerPlaceholder: 'Send a message...',
+    noMessages: 'No messages yet.',
+    noConversations: 'No conversations yet.'
+  },
+  providers: {
+    title: 'Providers',
+    add: 'Add provider',
+    test: 'Test',
+    refreshModels: 'Refresh models',
+    noProviders: 'No providers configured yet.',
+    apiKeyHelp: 'API keys are encrypted before storage. Use env:NAME to read from an environment variable.'
   }
 } as const;

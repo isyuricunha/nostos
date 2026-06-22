@@ -16,15 +16,19 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/yuricunha/nostos/internal/chat"
 	"github.com/yuricunha/nostos/internal/config"
 	"github.com/yuricunha/nostos/internal/health"
+	"github.com/yuricunha/nostos/internal/providers"
 )
 
 type RouterDeps struct {
-	Config config.Config
-	Logger *slog.Logger
-	Health *health.Service
-	Auth   AuthDeps
+	Config    config.Config
+	Logger    *slog.Logger
+	Health    *health.Service
+	Auth      AuthDeps
+	Providers *providers.Service
+	Chat      *chat.Service
 }
 
 type APIError struct {
@@ -63,6 +67,19 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		if deps.Auth.Auth != nil {
 			newAuthHandler(deps.Auth).Routes(r)
+		}
+		if deps.Auth.Auth != nil && (deps.Providers != nil || deps.Chat != nil) {
+			r.Group(func(r chi.Router) {
+				authHandler := newAuthHandler(deps.Auth)
+				r.Use(authHandler.requireAuth)
+				r.Use(authHandler.requireCSRF)
+				if deps.Providers != nil {
+					newProvidersHandler(deps.Providers).Routes(r)
+				}
+				if deps.Chat != nil {
+					newChatHandler(deps.Chat).Routes(r)
+				}
+			})
 		}
 		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, deps.Health.Ready(r.Context()))

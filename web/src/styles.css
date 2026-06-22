@@ -91,6 +91,21 @@ input {
   padding: 10px 11px;
 }
 
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--border-muted);
+  border-radius: 7px;
+  background: #050505;
+  color: var(--text);
+  padding: 10px 11px;
+}
+
+textarea {
+  min-height: 104px;
+  resize: vertical;
+}
+
 button {
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -310,6 +325,111 @@ dd {
   font-size: 0.88rem;
 }
 
+.workbench {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.list-panel,
+.chat-panel {
+  min-width: 0;
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 14px;
+}
+
+.list-item {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+  margin-top: 8px;
+  text-align: left;
+}
+
+.list-item.active {
+  border-color: var(--accent);
+}
+
+.list-item span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.chat-panel {
+  display: grid;
+  grid-template-rows: auto minmax(280px, 1fr) auto;
+  gap: 14px;
+  min-height: calc(100vh - 150px);
+}
+
+.chat-toolbar,
+.composer div {
+  display: flex;
+  gap: 10px;
+}
+
+.message-list {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  overflow: auto;
+}
+
+.message {
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  padding: 12px;
+}
+
+.message.user {
+  border-color: #303030;
+  background: #101010;
+}
+
+.message.assistant {
+  border-color: var(--border);
+}
+
+.message header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-transform: capitalize;
+}
+
+.message p {
+  margin: 8px 0 0;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.message small {
+  display: block;
+  margin-top: 8px;
+  color: var(--subtle);
+}
+
+.composer {
+  display: grid;
+  gap: 10px;
+}
+
+.composer div {
+  justify-content: flex-end;
+}
+
+.providers-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+  gap: 16px;
+}
+
 .skeleton {
   height: 128px;
   border-radius: 8px;
@@ -352,6 +472,15 @@ dd {
   }
 
   .table-list article {
+    flex-direction: column;
+  }
+
+  .workbench,
+  .providers-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-toolbar {
     flex-direction: column;
   }
 }

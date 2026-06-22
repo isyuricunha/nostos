@@ -1,0 +1,360 @@
+package chat
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/yuricunha/nostos/internal/config"
+	"github.com/yuricunha/nostos/internal/providers"
+)
+
+var ErrInvalidInput = errors.New("invalid chat input")
+
+type ProviderResolver interface {
+	ResolveForChat(ctx context.Context, workspaceID string, providerID string) (providers.Provider, string, error)
+}
+
+type Service struct {
+	cfg       config.Config
+	repo      Repository
+	providers ProviderResolver
+	client    *providers.OpenAIClient
+}
+
+type StreamSink func(event string, payload any) error
+
+func NewService(cfg config.Config, repo Repository, providerResolver ProviderResolver, client *providers.OpenAIClient) *Service {
+	return &Service{cfg: cfg, repo: repo, providers: providerResolver, client: client}
+}
+
+func (s *Service) ListConversations(ctx context.Context, principal PrincipalContext, search string) ([]Conversation, error) {
+	return s.repo.ListConversations(ctx, principal.WorkspaceID, principal.UserID, search)
+}
+
+func (s *Service) CreateConversation(ctx context.Context, principal PrincipalContext, input Conversation) (Conversation, error) {
+	input.WorkspaceID = principal.WorkspaceID
+	input.OwnerUserID = principal.UserID
+	return s.repo.CreateConversation(ctx, input)
+}
+
+func (s *Service) GetConversation(ctx context.Context, principal PrincipalContext, conversationID string) (Conversation, error) {
+	return s.repo.GetConversation(ctx, principal.WorkspaceID, principal.UserID, conversationID)
+}
+
+func (s *Service) UpdateConversation(ctx context.Context, principal PrincipalContext, conversationID string, input UpdateConversationInput) (Conversation, error) {
+	conversation, err := s.repo.GetConversation(ctx, principal.WorkspaceID, principal.UserID, conversationID)
+	if err != nil {
+		return Conversation{}, err
+	}
+	if strings.TrimSpace(input.Title) != "" {
+		conversation.Title = strings.TrimSpace(input.Title)
+	}
+	if input.Archive != nil {
+		if *input.Archive {
+			now := time.Now().UTC()
+			conversation.ArchivedAt = &now
+		} else {
+			conversation.ArchivedAt = nil
+		}
+	}
+	if input.Summary != nil {
+		conversation.Summary = strings.TrimSpace(*input.Summary)
+		now := time.Now().UTC()
+		if conversation.Summary == "" {
+			conversation.SummaryUpdatedAt = nil
+		} else {
+			conversation.SummaryUpdatedAt = &now
+		}
+	}
+	return s.repo.UpdateConversation(ctx, conversation)
+}
+
+func (s *Service) DeleteConversation(ctx context.Context, principal PrincipalContext, conversationID string) error {
+	return s.repo.DeleteConversation(ctx, principal.WorkspaceID, principal.UserID, conversationID, time.Now().UTC())
+}
+
+func (s *Service) ListMessages(ctx context.Context, principal PrincipalContext, conversationID string) ([]Message, error) {
+	return s.repo.ListMessages(ctx, principal.WorkspaceID, principal.UserID, conversationID)
+}
+
+func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversationID string, input RunInput, sink StreamSink) error {
+	content := strings.TrimSpace(input.Content)
+	if content == "" {
+		return fmt.Errorf("%w: message content is required", ErrInvalidInput)
+	}
+	conversation, err := s.repo.GetConversation(ctx, principal.WorkspaceID, principal.UserID, conversationID)
+	if err != nil {
+		return err
+	}
+	providerID := strings.TrimSpace(input.ProviderID)
+	if providerID == "" {
+		providerID = conversation.ProviderID
+	}
+	if providerID == "" {
+		return fmt.Errorf("%w: provider is required", ErrInvalidInput)
+	}
+	provider, apiKey, err := s.providers.ResolveForChat(ctx, principal.WorkspaceID, providerID)
+	if err != nil {
+		return err
+	}
+	model := strings.TrimSpace(input.Model)
+	if model == "" {
+		model = conversation.Model
+	}
+	if model == "" {
+		model = provider.DefaultModel
+	}
+	if model == "" {
+		return fmt.Errorf("%w: model is required", ErrInvalidInput)
+	}
+
+	userMessage, err := s.repo.CreateMessage(ctx, Message{
+		ConversationID: conversation.ID,
+		Role:           RoleUser,
+		Content:        content,
+		ProviderID:     provider.ID,
+		Model:          model,
+	})
+	if err != nil {
+		return err
+	}
+	assistantMessage, err := s.repo.CreateMessage(ctx, Message{
+		ConversationID:  conversation.ID,
+		ParentMessageID: userMessage.ID,
+		Role:            RoleAssistant,
+		Content:         "",
+		ProviderID:      provider.ID,
+		Model:           model,
+	})
+	if err != nil {
+		return err
+	}
+	run, err := s.repo.CreateRun(ctx, ChatRun{
+		ConversationID:     conversation.ID,
+		UserMessageID:      userMessage.ID,
+		AssistantMessageID: assistantMessage.ID,
+		ProviderID:         provider.ID,
+		Model:              model,
+	})
+	if err != nil {
+		return err
+	}
+	if err := sink("run_started", map[string]any{"run": run, "user_message": userMessage, "assistant_message": assistantMessage}); err != nil {
+		return err
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	events, err := s.client.StreamChat(streamCtx, providers.StreamRequest{
+		Provider: provider,
+		APIKey:   apiKey,
+		Model:    model,
+		Messages: s.promptMessages(conversation, content, provider.ID, model),
+	})
+	if err != nil {
+		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_unavailable", err.Error(), true)
+		_ = sink("run_failed", map[string]any{"run_id": run.ID, "message": err.Error()})
+		return err
+	}
+
+	var contentBuilder strings.Builder
+	var usage UsageValues
+	for event := range events {
+		cancelled, err := s.repo.CancellationRequested(ctx, run.ID)
+		if err != nil {
+			return err
+		}
+		if cancelled {
+			cancel()
+			_ = s.repo.UpdateRunState(ctx, run.ID, RunCancelled, "", "", true)
+			_ = sink("run_cancelled", map[string]any{"run_id": run.ID})
+			return nil
+		}
+		if event.Error != nil {
+			_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_stream_failed", event.Error.Error(), true)
+			_ = sink("run_failed", map[string]any{"run_id": run.ID, "message": event.Error.Error()})
+			return event.Error
+		}
+		switch event.Type {
+		case "content_delta":
+			contentBuilder.WriteString(event.Content)
+			_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), usage)
+			if err := sink("content_delta", map[string]string{"delta": event.Content}); err != nil {
+				return err
+			}
+		case "reasoning_delta":
+			if err := sink("reasoning_delta", map[string]string{"delta": event.Reasoning}); err != nil {
+				return err
+			}
+		case "tool_call_delta", "tool_call_ready":
+			if err := sink(event.Type, event.ToolCall); err != nil {
+				return err
+			}
+		case "usage":
+			if event.Usage != nil {
+				usage = UsageValues{PromptTokens: event.Usage.PromptTokens, CompletionTokens: event.Usage.CompletionTokens, TotalTokens: event.Usage.TotalTokens}
+				_ = s.repo.UpdateRunUsage(ctx, run.ID, usage)
+				_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), usage)
+				if err := sink("usage", usage); err != nil {
+					return err
+				}
+			}
+		case "run_completed":
+			_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), usage)
+			_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
+			return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
+		}
+	}
+	_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
+	return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
+}
+
+func (s *Service) CancelRun(ctx context.Context, principal PrincipalContext, runID string) error {
+	return s.repo.RequestCancellation(ctx, principal.WorkspaceID, principal.UserID, runID, time.Now().UTC())
+}
+
+func (s *Service) Regenerate(ctx context.Context, principal PrincipalContext, assistantMessageID string, input RunInput, sink StreamSink) error {
+	run, err := s.repo.FindRunByAssistantMessage(ctx, principal.WorkspaceID, principal.UserID, assistantMessageID)
+	if err != nil {
+		return err
+	}
+	userMessage, err := s.repo.GetMessage(ctx, principal.WorkspaceID, principal.UserID, run.UserMessageID)
+	if err != nil {
+		return err
+	}
+	branch, err := s.repo.CreateBranch(ctx, Branch{
+		ConversationID:  run.ConversationID,
+		ParentMessageID: userMessage.ParentMessageID,
+		SourceMessageID: assistantMessageID,
+		Name:            "Regenerated response",
+	})
+	if err != nil {
+		return err
+	}
+	input.Content = userMessage.Content
+	return s.runOnBranch(ctx, principal, run.ConversationID, branch.ID, input, sink)
+}
+
+func (s *Service) EditAndBranch(ctx context.Context, principal PrincipalContext, messageID string, input RunInput, sink StreamSink) error {
+	message, err := s.repo.GetMessage(ctx, principal.WorkspaceID, principal.UserID, messageID)
+	if err != nil {
+		return err
+	}
+	if message.Role != RoleUser {
+		return fmt.Errorf("%w: only user messages can be edited", ErrInvalidInput)
+	}
+	branch, err := s.repo.CreateBranch(ctx, Branch{
+		ConversationID:  message.ConversationID,
+		ParentMessageID: message.ParentMessageID,
+		SourceMessageID: message.ID,
+		Name:            "Edited message branch",
+	})
+	if err != nil {
+		return err
+	}
+	return s.runOnBranch(ctx, principal, message.ConversationID, branch.ID, input, sink)
+}
+
+func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, conversationID string, branchID string, input RunInput, sink StreamSink) error {
+	if strings.TrimSpace(input.Content) == "" {
+		return fmt.Errorf("%w: message content is required", ErrInvalidInput)
+	}
+	conversation, err := s.repo.GetConversation(ctx, principal.WorkspaceID, principal.UserID, conversationID)
+	if err != nil {
+		return err
+	}
+	providerID := input.ProviderID
+	if providerID == "" {
+		providerID = conversation.ProviderID
+	}
+	provider, apiKey, err := s.providers.ResolveForChat(ctx, principal.WorkspaceID, providerID)
+	if err != nil {
+		return err
+	}
+	model := input.Model
+	if model == "" {
+		model = conversation.Model
+	}
+	if model == "" {
+		model = provider.DefaultModel
+	}
+	userMessage, err := s.repo.CreateMessage(ctx, Message{
+		ConversationID: conversationID,
+		BranchID:       branchID,
+		Role:           RoleUser,
+		Content:        strings.TrimSpace(input.Content),
+		ProviderID:     provider.ID,
+		Model:          model,
+	})
+	if err != nil {
+		return err
+	}
+	assistantMessage, err := s.repo.CreateMessage(ctx, Message{
+		ConversationID:  conversationID,
+		BranchID:        branchID,
+		ParentMessageID: userMessage.ID,
+		Role:            RoleAssistant,
+		ProviderID:      provider.ID,
+		Model:           model,
+	})
+	if err != nil {
+		return err
+	}
+	run, err := s.repo.CreateRun(ctx, ChatRun{
+		ConversationID:     conversationID,
+		UserMessageID:      userMessage.ID,
+		AssistantMessageID: assistantMessage.ID,
+		BranchID:           branchID,
+		ProviderID:         provider.ID,
+		Model:              model,
+	})
+	if err != nil {
+		return err
+	}
+	if err := sink("run_started", map[string]any{"run": run, "user_message": userMessage, "assistant_message": assistantMessage}); err != nil {
+		return err
+	}
+	events, err := s.client.StreamChat(ctx, providers.StreamRequest{
+		Provider: provider,
+		APIKey:   apiKey,
+		Model:    model,
+		Messages: s.promptMessages(conversation, input.Content, provider.ID, model),
+	})
+	if err != nil {
+		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_unavailable", err.Error(), true)
+		return err
+	}
+	var contentBuilder strings.Builder
+	for event := range events {
+		if event.Type == "content_delta" {
+			contentBuilder.WriteString(event.Content)
+			_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), UsageValues{})
+			if err := sink("content_delta", map[string]string{"delta": event.Content}); err != nil {
+				return err
+			}
+		}
+		if event.Type == "run_completed" {
+			_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
+			return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
+		}
+	}
+	_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
+	return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
+}
+
+func (s *Service) CleanupInterruptedRuns(ctx context.Context) error {
+	_, err := s.repo.CleanupInterruptedRuns(ctx, time.Now().UTC())
+	return err
+}
+
+func (s *Service) promptMessages(conversation Conversation, latestContent string, providerID string, model string) []providers.ChatMessage {
+	messages := make([]providers.ChatMessage, 0, 3)
+	if conversation.Summary != "" {
+		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: "Conversation summary:\n" + conversation.Summary})
+	}
+	messages = append(messages, providers.ChatMessage{Role: RoleUser, Content: latestContent})
+	return messages
+}

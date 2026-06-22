@@ -19,6 +19,58 @@ export async function deleteJSON<T>(path: string): Promise<T> {
   return requestJSON<T>('DELETE', path);
 }
 
+export type StreamEventHandler = (event: string, payload: unknown) => void;
+
+export async function postStream(
+  path: string,
+  body: unknown,
+  onEvent: StreamEventHandler
+): Promise<void> {
+  const csrfToken = readCookie('nostos_csrf');
+  const response = await fetch(path, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      Accept: 'text/event-stream',
+      'Content-Type': 'application/json',
+      ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {})
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok || !response.body) {
+    const responseBody = (await response.json()) as APIError;
+    throw new Error(responseBody.error?.message ?? 'Streaming request failed.');
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop() ?? '';
+    for (const part of parts) {
+      const eventLine = part
+        .split('\n')
+        .find((line) => line.startsWith('event:'))
+        ?.replace('event:', '')
+        .trim();
+      const dataLine = part
+        .split('\n')
+        .find((line) => line.startsWith('data:'))
+        ?.replace('data:', '')
+        .trim();
+      if (!eventLine || !dataLine) {
+        continue;
+      }
+      onEvent(eventLine, JSON.parse(dataLine) as unknown);
+    }
+  }
+}
+
 async function requestJSON<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {
     Accept: 'application/json'

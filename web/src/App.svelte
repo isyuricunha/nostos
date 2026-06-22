@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { deleteJSON, getJSON, postJSON } from './lib/api';
+  import { deleteJSON, getJSON, postJSON, postStream } from './lib/api';
   import { strings } from './strings';
 
   type User = {
@@ -16,6 +16,45 @@
     ip_address?: string;
     user_agent?: string;
     expires_at: string;
+    created_at: string;
+  };
+
+  type Provider = {
+    id: string;
+    name: string;
+    base_url: string;
+    enabled: boolean;
+    request_timeout_ms: number;
+    default_model?: string;
+    fallback_model?: string;
+    health_status: string;
+    last_error?: string;
+    api_key_env_ref?: string;
+  };
+
+  type ProviderModel = {
+    id: string;
+    provider_id: string;
+    model_id: string;
+  };
+
+  type Conversation = {
+    id: string;
+    title: string;
+    provider_id?: string;
+    model?: string;
+    summary?: string;
+    archived_at?: string;
+    updated_at: string;
+  };
+
+  type Message = {
+    id: string;
+    role: 'system' | 'user' | 'assistant' | 'tool';
+    content: string;
+    provider_id?: string;
+    model?: string;
+    total_tokens?: number;
     created_at: string;
   };
 
@@ -42,6 +81,30 @@
     sessions: Session[];
   };
 
+  type ProvidersResponse = {
+    providers: Provider[];
+  };
+
+  type ProviderResponse = {
+    provider: Provider;
+  };
+
+  type ModelsResponse = {
+    models: ProviderModel[];
+  };
+
+  type ConversationsResponse = {
+    conversations: Conversation[];
+  };
+
+  type ConversationResponse = {
+    conversation: Conversation;
+  };
+
+  type MessagesResponse = {
+    messages: Message[];
+  };
+
   const navItems = [
     strings.nav.chat,
     strings.nav.agents,
@@ -56,6 +119,15 @@
   let user: User | null = null;
   let sessions: Session[] = [];
   let status: ReadyStatus | null = null;
+  let providers: Provider[] = [];
+  let providerModels: ProviderModel[] = [];
+  let conversations: Conversation[] = [];
+  let messages: Message[] = [];
+  let selectedConversationId = '';
+  let selectedProviderId = '';
+  let selectedModel = '';
+  let composer = '';
+  let activeRunId = '';
   let activeView: string = strings.nav.chat;
   let loading = true;
   let submitting = false;
@@ -68,6 +140,11 @@
   let setupConfirmPassword = '';
   let loginEmail = '';
   let loginPassword = '';
+  let providerName = '';
+  let providerBaseUrl = '';
+  let providerApiKey = '';
+  let providerApiKeyEnvRef = '';
+  let providerDefaultModel = '';
 
   onMount(async () => {
     await refreshAppState();
@@ -83,7 +160,7 @@
         await refreshUser();
       }
       if (user) {
-        await Promise.all([refreshSessions(), refreshDiagnostics()]);
+        await Promise.all([refreshSessions(), refreshDiagnostics(), refreshProviders(), refreshConversations()]);
       }
     } catch (error) {
       errorMessage = messageFromError(error);
@@ -126,7 +203,7 @@
       setupPassword = '';
       setupConfirmPassword = '';
       notice = 'Owner account created.';
-      await Promise.all([refreshSessions(), refreshDiagnostics()]);
+      await Promise.all([refreshSessions(), refreshDiagnostics(), refreshProviders(), refreshConversations()]);
     } catch (error) {
       errorMessage = messageFromError(error);
     } finally {
@@ -146,7 +223,7 @@
       user = response.user;
       loginPassword = '';
       notice = 'Signed in.';
-      await Promise.all([refreshSessions(), refreshDiagnostics()]);
+      await Promise.all([refreshSessions(), refreshDiagnostics(), refreshProviders(), refreshConversations()]);
     } catch (error) {
       errorMessage = messageFromError(error);
     } finally {
@@ -186,6 +263,176 @@
     } finally {
       submitting = false;
     }
+  }
+
+  async function refreshProviders(): Promise<void> {
+    const response = await getJSON<ProvidersResponse>('/api/v1/providers');
+    providers = response.providers;
+    if (!selectedProviderId && providers.length > 0) {
+      selectedProviderId = providers[0].id;
+      selectedModel = providers[0].default_model ?? '';
+      await refreshModels(selectedProviderId);
+    }
+  }
+
+  async function refreshModels(providerId = selectedProviderId): Promise<void> {
+    if (!providerId) {
+      providerModels = [];
+      return;
+    }
+    const response = await getJSON<ModelsResponse>(`/api/v1/providers/${providerId}/models`);
+    providerModels = response.models;
+    if (!selectedModel && providerModels.length > 0) {
+      selectedModel = providerModels[0].model_id;
+    }
+  }
+
+  async function createProvider(): Promise<void> {
+    submitting = true;
+    errorMessage = '';
+    notice = '';
+    try {
+      const payload = {
+        name: providerName,
+        base_url: providerBaseUrl,
+        api_key: providerApiKey || undefined,
+        api_key_env_ref: providerApiKeyEnvRef,
+        enabled: true,
+        request_timeout_ms: 60000,
+        default_model: providerDefaultModel
+      };
+      const response = await postJSON<ProviderResponse>('/api/v1/providers', payload);
+      providerName = '';
+      providerBaseUrl = '';
+      providerApiKey = '';
+      providerApiKeyEnvRef = '';
+      providerDefaultModel = '';
+      selectedProviderId = response.provider.id;
+      selectedModel = response.provider.default_model ?? '';
+      await refreshProviders();
+      notice = 'Provider saved.';
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function testProvider(providerId: string): Promise<void> {
+    submitting = true;
+    errorMessage = '';
+    try {
+      await postJSON<{ ok: boolean }>(`/api/v1/providers/${providerId}/test`);
+      await refreshProviders();
+      notice = 'Provider connection succeeded.';
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function refreshProviderModels(providerId: string): Promise<void> {
+    submitting = true;
+    errorMessage = '';
+    try {
+      const response = await postJSON<ModelsResponse>(`/api/v1/providers/${providerId}/models/refresh`);
+      providerModels = response.models;
+      selectedProviderId = providerId;
+      if (response.models.length > 0) {
+        selectedModel = response.models[0].model_id;
+      }
+      await refreshProviders();
+      notice = 'Models refreshed.';
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function refreshConversations(): Promise<void> {
+    const response = await getJSON<ConversationsResponse>('/api/v1/conversations');
+    conversations = response.conversations;
+    if (!selectedConversationId && conversations.length > 0) {
+      await selectConversation(conversations[0].id);
+    }
+  }
+
+  async function createConversation(): Promise<void> {
+    const response = await postJSON<ConversationResponse>('/api/v1/conversations', {
+      title: strings.chat.newConversation,
+      provider_id: selectedProviderId,
+      model: selectedModel
+    });
+    conversations = [response.conversation, ...conversations];
+    await selectConversation(response.conversation.id);
+  }
+
+  async function selectConversation(conversationId: string): Promise<void> {
+    selectedConversationId = conversationId;
+    const response = await getJSON<MessagesResponse>(`/api/v1/conversations/${conversationId}/messages`);
+    messages = response.messages;
+    const conversation = conversations.find((item) => item.id === conversationId);
+    if (conversation) {
+      selectedProviderId = conversation.provider_id || selectedProviderId;
+      selectedModel = conversation.model || selectedModel;
+      await refreshModels(selectedProviderId);
+    }
+  }
+
+  async function sendMessage(): Promise<void> {
+    if (!composer.trim()) {
+      return;
+    }
+    if (!selectedProviderId) {
+      errorMessage = 'Select a provider before sending a message.';
+      return;
+    }
+    if (!selectedConversationId) {
+      await createConversation();
+    }
+    const content = composer;
+    composer = '';
+    errorMessage = '';
+    await postStream(
+      `/api/v1/conversations/${selectedConversationId}/runs`,
+      { content, provider_id: selectedProviderId, model: selectedModel },
+      handleChatEvent
+    );
+    activeRunId = '';
+    await Promise.all([refreshConversations(), selectConversation(selectedConversationId)]);
+  }
+
+  async function stopGeneration(): Promise<void> {
+    if (!activeRunId) {
+      return;
+    }
+    await postJSON<{ ok: boolean }>(`/api/v1/chat-runs/${activeRunId}/cancel`);
+  }
+
+  function handleChatEvent(event: string, payload: unknown): void {
+    if (event === 'run_started' && isRunStarted(payload)) {
+      activeRunId = payload.run.id;
+      messages = [...messages, payload.user_message, payload.assistant_message];
+    }
+    if (event === 'content_delta' && isContentDelta(payload)) {
+      const last = messages[messages.length - 1];
+      if (last?.role === 'assistant') {
+        messages = [...messages.slice(0, -1), { ...last, content: `${last.content}${payload.delta}` }];
+      }
+    }
+    if (event === 'run_completed' || event === 'run_failed' || event === 'run_cancelled') {
+      activeRunId = '';
+    }
+  }
+
+  function isRunStarted(payload: unknown): payload is { run: { id: string }; user_message: Message; assistant_message: Message } {
+    return typeof payload === 'object' && payload !== null && 'run' in payload && 'user_message' in payload;
+  }
+
+  function isContentDelta(payload: unknown): payload is { delta: string } {
+    return typeof payload === 'object' && payload !== null && 'delta' in payload;
   }
 
   function messageFromError(error: unknown): string {
@@ -362,11 +609,138 @@
           {/if}
         </section>
       {:else}
+        {#if activeView === strings.nav.chat}
+          <section class="workbench" aria-label="Chat workspace">
+            <aside class="list-panel">
+              <div class="panel-heading">
+                <h2>Conversations</h2>
+                <button on:click={createConversation} type="button">{strings.chat.newConversation}</button>
+              </div>
+              {#if conversations.length === 0}
+                <p>{strings.chat.noConversations}</p>
+              {:else}
+                {#each conversations as conversation (conversation.id)}
+                  <button
+                    class:active={selectedConversationId === conversation.id}
+                    class="list-item"
+                    on:click={() => selectConversation(conversation.id)}
+                    type="button"
+                  >
+                    <strong>{conversation.title}</strong>
+                    <span>{new Date(conversation.updated_at).toLocaleString()}</span>
+                  </button>
+                {/each}
+              {/if}
+            </aside>
+            <section class="chat-panel">
+              <div class="chat-toolbar">
+                <select bind:value={selectedProviderId} on:change={() => refreshModels(selectedProviderId)}>
+                  <option value="">Select provider</option>
+                  {#each providers as provider (provider.id)}
+                    <option value={provider.id}>{provider.name}</option>
+                  {/each}
+                </select>
+                <select bind:value={selectedModel}>
+                  <option value="">Manual model</option>
+                  {#each providerModels as model (model.id)}
+                    <option value={model.model_id}>{model.model_id}</option>
+                  {/each}
+                </select>
+                <input bind:value={selectedModel} aria-label="Model" placeholder="Model ID" />
+              </div>
+              <div class="message-list" aria-live="polite">
+                {#if messages.length === 0}
+                  <p>{strings.chat.noMessages}</p>
+                {:else}
+                  {#each messages as message (message.id)}
+                    <article class={`message ${message.role}`}>
+                      <header>
+                        <strong>{message.role}</strong>
+                        {#if message.model}
+                          <span>{message.model}</span>
+                        {/if}
+                      </header>
+                      <p>{message.content}</p>
+                      {#if message.total_tokens}
+                        <small>{message.total_tokens} tokens</small>
+                      {/if}
+                    </article>
+                  {/each}
+                {/if}
+              </div>
+              <form class="composer" on:submit|preventDefault={sendMessage}>
+                <textarea bind:value={composer} placeholder={strings.chat.composerPlaceholder}></textarea>
+                <div>
+                  {#if activeRunId}
+                    <button on:click={stopGeneration} type="button">{strings.chat.stop}</button>
+                  {/if}
+                  <button disabled={submitting || !composer.trim()} type="submit">{strings.chat.send}</button>
+                </div>
+              </form>
+            </section>
+          </section>
+        {:else if activeView === strings.nav.providers}
+          <section class="providers-layout">
+            <form class="panel" on:submit|preventDefault={createProvider}>
+              <h2>{strings.providers.add}</h2>
+              <p>{strings.providers.apiKeyHelp}</p>
+              <label>
+                Name
+                <input bind:value={providerName} required />
+              </label>
+              <label>
+                Base URL
+                <input bind:value={providerBaseUrl} placeholder="https://bifrost.example.com" required />
+              </label>
+              <label>
+                API key
+                <input bind:value={providerApiKey} autocomplete="off" type="password" />
+              </label>
+              <label>
+                Environment reference
+                <input bind:value={providerApiKeyEnvRef} placeholder="env:BIFROST_API_KEY" />
+              </label>
+              <label>
+                Default model
+                <input bind:value={providerDefaultModel} placeholder="gpt-4.1-mini" />
+              </label>
+              <button disabled={submitting} type="submit">{strings.providers.add}</button>
+            </form>
+            <section class="panel">
+              <div class="panel-heading">
+                <h2>{strings.providers.title}</h2>
+                <button on:click={refreshProviders} type="button">Refresh</button>
+              </div>
+              {#if providers.length === 0}
+                <p>{strings.providers.noProviders}</p>
+              {:else}
+                <div class="table-list">
+                  {#each providers as provider (provider.id)}
+                    <article>
+                      <div>
+                        <strong>{provider.name}</strong>
+                        <span>{provider.base_url}</span>
+                        <span>{provider.health_status}{provider.last_error ? `: ${provider.last_error}` : ''}</span>
+                      </div>
+                      <div>
+                        <button on:click={() => testProvider(provider.id)} type="button">{strings.providers.test}</button>
+                        <button on:click={() => refreshProviderModels(provider.id)} type="button">
+                          {strings.providers.refreshModels}
+                        </button>
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+              {/if}
+            </section>
+          </section>
+        {:else}
         <section class="panel" aria-labelledby="screen-title">
           <p class="eyebrow">{strings.workspace.title}</p>
           <h2 id="screen-title">{activeView}</h2>
           <p>{strings.workspace.emptyScreen}</p>
         </section>
+        {/if}
       {/if}
     </section>
   </main>
