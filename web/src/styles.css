@@ -91,6 +91,10 @@ input {
   padding: 10px 11px;
 }
 
+input[type='checkbox'] {
+  width: auto;
+}
+
 select,
 textarea {
   width: 100%;
@@ -413,6 +417,35 @@ dd {
   display: block;
   margin-top: 8px;
   color: var(--subtle);
+}
+
+.message button {
+  margin-top: 8px;
+}
+
+.memory-panel {
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  background: #090909;
+  padding: 12px;
+}
+
+.memory-panel summary {
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.memory-panel article {
+  border-top: 1px solid var(--border-muted);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.inline-check {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
 }
 
 .composer {

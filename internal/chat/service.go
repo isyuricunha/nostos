@@ -17,17 +17,35 @@ type ProviderResolver interface {
 	ResolveForChat(ctx context.Context, workspaceID string, providerID string) (providers.Provider, string, error)
 }
 
+type AgentResolver interface {
+	GetChatAgent(ctx context.Context, workspaceID string, agentID string) (AgentContext, error)
+}
+
+type MemoryProvider interface {
+	SelectForRun(ctx context.Context, request MemoryRequest) ([]MemorySnippet, error)
+	RecordRunMemories(ctx context.Context, runID string, memories []MemorySnippet) error
+}
+
 type Service struct {
 	cfg       config.Config
 	repo      Repository
 	providers ProviderResolver
 	client    *providers.OpenAIClient
+	agents    AgentResolver
+	memories  MemoryProvider
 }
 
 type StreamSink func(event string, payload any) error
 
-func NewService(cfg config.Config, repo Repository, providerResolver ProviderResolver, client *providers.OpenAIClient) *Service {
-	return &Service{cfg: cfg, repo: repo, providers: providerResolver, client: client}
+func NewService(
+	cfg config.Config,
+	repo Repository,
+	providerResolver ProviderResolver,
+	client *providers.OpenAIClient,
+	agentResolver AgentResolver,
+	memoryProvider MemoryProvider,
+) *Service {
+	return &Service{cfg: cfg, repo: repo, providers: providerResolver, client: client, agents: agentResolver, memories: memoryProvider}
 }
 
 func (s *Service) ListConversations(ctx context.Context, principal PrincipalContext, search string) ([]Conversation, error) {
@@ -93,6 +111,13 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 	if providerID == "" {
 		providerID = conversation.ProviderID
 	}
+	agent, err := s.resolveAgent(ctx, conversation)
+	if err != nil {
+		return err
+	}
+	if providerID == "" {
+		providerID = agent.DefaultProviderID
+	}
 	if providerID == "" {
 		return fmt.Errorf("%w: provider is required", ErrInvalidInput)
 	}
@@ -103,6 +128,9 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 	model := strings.TrimSpace(input.Model)
 	if model == "" {
 		model = conversation.Model
+	}
+	if model == "" {
+		model = agent.DefaultModel
 	}
 	if model == "" {
 		model = provider.DefaultModel
@@ -142,8 +170,23 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 	if err != nil {
 		return err
 	}
+	memories, err := s.selectMemories(ctx, principal, conversation, agent, content)
+	if err != nil {
+		return err
+	}
+	if len(memories) > 0 {
+		_ = s.repo.UpdateRunState(ctx, run.ID, RunStreaming, "", "", false)
+		if err := s.memories.RecordRunMemories(ctx, run.ID, memories); err != nil {
+			return err
+		}
+	}
 	if err := sink("run_started", map[string]any{"run": run, "user_message": userMessage, "assistant_message": assistantMessage}); err != nil {
 		return err
+	}
+	if len(memories) > 0 {
+		if err := sink("memories_used", map[string]any{"memories": memories}); err != nil {
+			return err
+		}
 	}
 
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -152,7 +195,7 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 		Provider: provider,
 		APIKey:   apiKey,
 		Model:    model,
-		Messages: s.promptMessages(conversation, content, provider.ID, model),
+		Messages: s.promptMessages(conversation, agent, memories, content),
 	})
 	if err != nil {
 		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_unavailable", err.Error(), true)
@@ -270,6 +313,13 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 	if providerID == "" {
 		providerID = conversation.ProviderID
 	}
+	agent, err := s.resolveAgent(ctx, conversation)
+	if err != nil {
+		return err
+	}
+	if providerID == "" {
+		providerID = agent.DefaultProviderID
+	}
 	provider, apiKey, err := s.providers.ResolveForChat(ctx, principal.WorkspaceID, providerID)
 	if err != nil {
 		return err
@@ -277,6 +327,9 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 	model := input.Model
 	if model == "" {
 		model = conversation.Model
+	}
+	if model == "" {
+		model = agent.DefaultModel
 	}
 	if model == "" {
 		model = provider.DefaultModel
@@ -317,11 +370,23 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 	if err := sink("run_started", map[string]any{"run": run, "user_message": userMessage, "assistant_message": assistantMessage}); err != nil {
 		return err
 	}
+	memories, err := s.selectMemories(ctx, principal, conversation, agent, input.Content)
+	if err != nil {
+		return err
+	}
+	if len(memories) > 0 {
+		if err := s.memories.RecordRunMemories(ctx, run.ID, memories); err != nil {
+			return err
+		}
+		if err := sink("memories_used", map[string]any{"memories": memories}); err != nil {
+			return err
+		}
+	}
 	events, err := s.client.StreamChat(ctx, providers.StreamRequest{
 		Provider: provider,
 		APIKey:   apiKey,
 		Model:    model,
-		Messages: s.promptMessages(conversation, input.Content, provider.ID, model),
+		Messages: s.promptMessages(conversation, agent, memories, input.Content),
 	})
 	if err != nil {
 		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_unavailable", err.Error(), true)
@@ -350,10 +415,53 @@ func (s *Service) CleanupInterruptedRuns(ctx context.Context) error {
 	return err
 }
 
-func (s *Service) promptMessages(conversation Conversation, latestContent string, providerID string, model string) []providers.ChatMessage {
-	messages := make([]providers.ChatMessage, 0, 3)
+func (s *Service) resolveAgent(ctx context.Context, conversation Conversation) (AgentContext, error) {
+	if s.agents == nil || conversation.AgentID == "" {
+		return AgentContext{MemoryAccessMode: "pinned_only"}, nil
+	}
+	agent, err := s.agents.GetChatAgent(ctx, conversation.WorkspaceID, conversation.AgentID)
+	if err != nil {
+		return AgentContext{}, err
+	}
+	if agent.MemoryAccessMode == "" {
+		agent.MemoryAccessMode = "pinned_only"
+	}
+	return agent, nil
+}
+
+func (s *Service) selectMemories(ctx context.Context, principal PrincipalContext, conversation Conversation, agent AgentContext, query string) ([]MemorySnippet, error) {
+	if s.memories == nil {
+		return nil, nil
+	}
+	return s.memories.SelectForRun(ctx, MemoryRequest{
+		WorkspaceID:    principal.WorkspaceID,
+		UserID:         principal.UserID,
+		AgentID:        agent.ID,
+		ConversationID: conversation.ID,
+		AccessMode:     agent.MemoryAccessMode,
+		Query:          query,
+	})
+}
+
+func (s *Service) promptMessages(conversation Conversation, agent AgentContext, memories []MemorySnippet, latestContent string) []providers.ChatMessage {
+	messages := make([]providers.ChatMessage, 0, 4)
+	if agent.SystemPrompt != "" {
+		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: agent.SystemPrompt})
+	}
 	if conversation.Summary != "" {
 		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: "Conversation summary:\n" + conversation.Summary})
+	}
+	if len(memories) > 0 {
+		var builder strings.Builder
+		builder.WriteString("Explicit memories selected for this run:\n")
+		for _, memory := range memories {
+			builder.WriteString("- ")
+			builder.WriteString(memory.Title)
+			builder.WriteString(": ")
+			builder.WriteString(memory.Content)
+			builder.WriteString("\n")
+		}
+		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: builder.String()})
 	}
 	messages = append(messages, providers.ChatMessage{Role: RoleUser, Content: latestContent})
 	return messages

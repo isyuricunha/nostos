@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yuricunha/nostos/internal/agents"
 	"github.com/yuricunha/nostos/internal/api"
 	"github.com/yuricunha/nostos/internal/auth"
 	"github.com/yuricunha/nostos/internal/chat"
@@ -18,6 +19,7 @@ import (
 	"github.com/yuricunha/nostos/internal/database"
 	"github.com/yuricunha/nostos/internal/health"
 	"github.com/yuricunha/nostos/internal/logging"
+	"github.com/yuricunha/nostos/internal/memory"
 	"github.com/yuricunha/nostos/internal/providers"
 	"github.com/yuricunha/nostos/internal/worker"
 )
@@ -76,8 +78,13 @@ func run(args []string) error {
 	providerRepo := providers.NewSQLRepository(store)
 	providerClient := providers.NewOpenAIClient()
 	providerService := providers.NewService(cfg, providerRepo, authRepo, providerClient)
+	agentService := agents.NewService(agents.NewSQLRepository(store))
+	if err := agentService.EnsureDefaultAgents(ctx); err != nil {
+		return err
+	}
+	memoryService := memory.NewService(memory.NewSQLRepository(store))
 	chatRepo := chat.NewSQLRepository(store)
-	chatService := chat.NewService(cfg, chatRepo, providerService, providerClient)
+	chatService := chat.NewService(cfg, chatRepo, providerService, providerClient, agentService, memoryService)
 	if err := chatService.CleanupInterruptedRuns(ctx); err != nil {
 		return err
 	}
@@ -94,7 +101,7 @@ func run(args []string) error {
 	case "worker":
 		return runWorker(ctx, cfg, logger, store)
 	case "server":
-		return runServer(ctx, cfg, logger, store, authService, providerService, chatService)
+		return runServer(ctx, cfg, logger, store, authService, providerService, chatService, agentService, memoryService)
 	default:
 		return nil
 	}
@@ -108,6 +115,8 @@ func runServer(
 	authService *auth.Service,
 	providerService *providers.Service,
 	chatService *chat.Service,
+	agentService *agents.Service,
+	memoryService *memory.Service,
 ) error {
 	healthService := health.NewService(store, version, buildCommit, buildTimestamp)
 	handler := api.NewRouter(api.RouterDeps{
@@ -120,6 +129,8 @@ func runServer(
 		},
 		Providers: providerService,
 		Chat:      chatService,
+		Agents:    agentService,
+		Memories:  memoryService,
 	})
 
 	server := &http.Server{

@@ -56,7 +56,8 @@ func TestRunStreamsAndPersistsConversation(t *testing.T) {
 	}
 
 	repo := NewSQLRepository(store)
-	service := NewService(cfg, repo, providerService, providerClient)
+	memoryProvider := &fakeMemoryProvider{snippets: []MemorySnippet{{ID: "mem_1", Title: "Greeting style", Content: "Prefer concise greetings.", Score: 2.4}}}
+	service := NewService(cfg, repo, providerService, providerClient, fakeAgentResolver{}, memoryProvider)
 	conversation, err := service.CreateConversation(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, Conversation{
 		Title:      "Mock chat",
 		ProviderID: provider.ID,
@@ -66,8 +67,16 @@ func TestRunStreamsAndPersistsConversation(t *testing.T) {
 		t.Fatalf("create conversation: %v", err)
 	}
 	var events []string
+	runID := ""
 	err = service.Run(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, conversation.ID, RunInput{Content: "Say hello"}, func(event string, payload any) error {
 		events = append(events, event)
+		if event == "run_started" {
+			if started, ok := payload.(map[string]any); ok {
+				if run, ok := started["run"].(ChatRun); ok {
+					runID = run.ID
+				}
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -86,6 +95,35 @@ func TestRunStreamsAndPersistsConversation(t *testing.T) {
 	if messages[1].Content != "Hello from mock" || messages[1].TotalTokens != 7 {
 		t.Fatalf("assistant message was not persisted correctly: %#v", messages[1])
 	}
+	if memoryProvider.recordedRunID != runID || len(memoryProvider.recorded) != 1 {
+		t.Fatalf("memory injection was not recorded: %#v", memoryProvider)
+	}
+}
+
+type fakeAgentResolver struct{}
+
+func (fakeAgentResolver) GetChatAgent(ctx context.Context, workspaceID string, agentID string) (AgentContext, error) {
+	return AgentContext{
+		ID:               agentID,
+		SystemPrompt:     "Use the selected memories.",
+		MemoryAccessMode: "pinned_only",
+	}, nil
+}
+
+type fakeMemoryProvider struct {
+	snippets      []MemorySnippet
+	recordedRunID string
+	recorded      []MemorySnippet
+}
+
+func (f *fakeMemoryProvider) SelectForRun(ctx context.Context, request MemoryRequest) ([]MemorySnippet, error) {
+	return f.snippets, nil
+}
+
+func (f *fakeMemoryProvider) RecordRunMemories(ctx context.Context, runID string, memories []MemorySnippet) error {
+	f.recordedRunID = runID
+	f.recorded = memories
+	return nil
 }
 
 func newChatTestContext(t *testing.T) (config.Config, *database.Store, auth.User, func()) {

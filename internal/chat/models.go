@@ -85,6 +85,32 @@ type PrincipalContext struct {
 	UserID      string
 }
 
+type AgentContext struct {
+	ID                string
+	Name              string
+	SystemPrompt      string
+	DefaultProviderID string
+	DefaultModel      string
+	FallbackModel     string
+	MemoryAccessMode  string
+}
+
+type MemoryRequest struct {
+	WorkspaceID    string
+	UserID         string
+	AgentID        string
+	ConversationID string
+	AccessMode     string
+	Query          string
+}
+
+type MemorySnippet struct {
+	ID      string  `json:"id"`
+	Title   string  `json:"title"`
+	Content string  `json:"content"`
+	Score   float64 `json:"score"`
+}
+
 type RunInput struct {
 	Content    string `json:"content"`
 	ProviderID string `json:"provider_id,omitempty"`

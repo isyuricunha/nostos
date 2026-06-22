@@ -81,10 +81,10 @@ func (r *SQLRepository) CreateConversation(ctx context.Context, conversation Con
 	if strings.TrimSpace(conversation.Title) == "" {
 		conversation.Title = "New conversation"
 	}
-	query := `INSERT INTO conversations (id, workspace_id, owner_user_id, provider_id, model, title, summary, created_at, updated_at)
-VALUES (` + placeholders(r.store, 9) + `)`
+	query := `INSERT INTO conversations (id, workspace_id, owner_user_id, agent_id, provider_id, model, title, summary, created_at, updated_at)
+VALUES (` + placeholders(r.store, 10) + `)`
 	_, err := r.store.DB.ExecContext(ctx, query,
-		conversation.ID, conversation.WorkspaceID, conversation.OwnerUserID, nullableString(conversation.ProviderID),
+		conversation.ID, conversation.WorkspaceID, conversation.OwnerUserID, nullableString(conversation.AgentID), nullableString(conversation.ProviderID),
 		nullableString(conversation.Model), conversation.Title, conversation.Summary, r.store.NowArg(now), r.store.NowArg(now),
 	)
 	return conversation, err

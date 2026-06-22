@@ -41,6 +41,7 @@
   type Conversation = {
     id: string;
     title: string;
+    agent_id?: string;
     provider_id?: string;
     model?: string;
     summary?: string;
@@ -56,6 +57,39 @@
     model?: string;
     total_tokens?: number;
     created_at: string;
+  };
+
+  type Agent = {
+    id: string;
+    name: string;
+    description: string;
+    avatar: string;
+    system_prompt: string;
+    default_provider_id?: string;
+    default_model?: string;
+    memory_access_mode: string;
+    max_tool_iterations: number;
+    active: boolean;
+  };
+
+  type Memory = {
+    id: string;
+    title: string;
+    content: string;
+    tags: string[];
+    scope: string;
+    importance: number;
+    pinned: boolean;
+    active: boolean;
+    source: string;
+    use_count: number;
+  };
+
+  type MemorySnippet = {
+    id: string;
+    title: string;
+    content: string;
+    score: number;
   };
 
   type ReadyStatus = {
@@ -105,6 +139,22 @@
     messages: Message[];
   };
 
+  type AgentsResponse = {
+    agents: Agent[];
+  };
+
+  type AgentResponse = {
+    agent: Agent;
+  };
+
+  type MemoriesResponse = {
+    memories: Memory[];
+  };
+
+  type MemoryResponse = {
+    memory: Memory;
+  };
+
   const navItems = [
     strings.nav.chat,
     strings.nav.agents,
@@ -123,7 +173,11 @@
   let providerModels: ProviderModel[] = [];
   let conversations: Conversation[] = [];
   let messages: Message[] = [];
+  let agents: Agent[] = [];
+  let memories: Memory[] = [];
+  let runMemories: MemorySnippet[] = [];
   let selectedConversationId = '';
+  let selectedAgentId = '';
   let selectedProviderId = '';
   let selectedModel = '';
   let composer = '';
@@ -145,6 +199,13 @@
   let providerApiKey = '';
   let providerApiKeyEnvRef = '';
   let providerDefaultModel = '';
+  let agentName = '';
+  let agentPrompt = '';
+  let agentMemoryMode = 'pinned_only';
+  let memoryTitle = '';
+  let memoryContent = '';
+  let memoryTags = '';
+  let memoryPinned = true;
 
   onMount(async () => {
     await refreshAppState();
@@ -160,7 +221,7 @@
         await refreshUser();
       }
       if (user) {
-        await Promise.all([refreshSessions(), refreshDiagnostics(), refreshProviders(), refreshConversations()]);
+        await refreshWorkspaceData();
       }
     } catch (error) {
       errorMessage = messageFromError(error);
@@ -187,6 +248,17 @@
     status = await getJSON<ReadyStatus>('/api/v1/diagnostics');
   }
 
+  async function refreshWorkspaceData(): Promise<void> {
+    await Promise.all([
+      refreshSessions(),
+      refreshDiagnostics(),
+      refreshProviders(),
+      refreshAgents(),
+      refreshMemories(),
+      refreshConversations()
+    ]);
+  }
+
   async function submitSetup(): Promise<void> {
     submitting = true;
     notice = '';
@@ -203,7 +275,7 @@
       setupPassword = '';
       setupConfirmPassword = '';
       notice = 'Owner account created.';
-      await Promise.all([refreshSessions(), refreshDiagnostics(), refreshProviders(), refreshConversations()]);
+      await refreshWorkspaceData();
     } catch (error) {
       errorMessage = messageFromError(error);
     } finally {
@@ -223,7 +295,7 @@
       user = response.user;
       loginPassword = '';
       notice = 'Signed in.';
-      await Promise.all([refreshSessions(), refreshDiagnostics(), refreshProviders(), refreshConversations()]);
+      await refreshWorkspaceData();
     } catch (error) {
       errorMessage = messageFromError(error);
     } finally {
@@ -362,6 +434,7 @@
   async function createConversation(): Promise<void> {
     const response = await postJSON<ConversationResponse>('/api/v1/conversations', {
       title: strings.chat.newConversation,
+      agent_id: selectedAgentId,
       provider_id: selectedProviderId,
       model: selectedModel
     });
@@ -375,6 +448,7 @@
     messages = response.messages;
     const conversation = conversations.find((item) => item.id === conversationId);
     if (conversation) {
+      selectedAgentId = conversation.agent_id || selectedAgentId;
       selectedProviderId = conversation.provider_id || selectedProviderId;
       selectedModel = conversation.model || selectedModel;
       await refreshModels(selectedProviderId);
@@ -414,7 +488,11 @@
   function handleChatEvent(event: string, payload: unknown): void {
     if (event === 'run_started' && isRunStarted(payload)) {
       activeRunId = payload.run.id;
+      runMemories = [];
       messages = [...messages, payload.user_message, payload.assistant_message];
+    }
+    if (event === 'memories_used' && isMemoriesUsed(payload)) {
+      runMemories = payload.memories;
     }
     if (event === 'content_delta' && isContentDelta(payload)) {
       const last = messages[messages.length - 1];
@@ -433,6 +511,102 @@
 
   function isContentDelta(payload: unknown): payload is { delta: string } {
     return typeof payload === 'object' && payload !== null && 'delta' in payload;
+  }
+
+  function isMemoriesUsed(payload: unknown): payload is { memories: MemorySnippet[] } {
+    return typeof payload === 'object' && payload !== null && 'memories' in payload;
+  }
+
+  async function refreshAgents(): Promise<void> {
+    const response = await getJSON<AgentsResponse>('/api/v1/agents');
+    agents = response.agents;
+    if (!selectedAgentId && agents.length > 0) {
+      selectedAgentId = agents[0].id;
+    }
+  }
+
+  async function createAgent(): Promise<void> {
+    const response = await postJSON<AgentResponse>('/api/v1/agents', {
+      name: agentName,
+      description: '',
+      avatar: 'sparkles',
+      system_prompt: agentPrompt,
+      temperature: 0.7,
+      max_tool_iterations: 8,
+      memory_access_mode: agentMemoryMode,
+      tool_permission_default: 'ask',
+      active: true
+    });
+    agents = [response.agent, ...agents];
+    selectedAgentId = response.agent.id;
+    agentName = '';
+    agentPrompt = '';
+    notice = 'Agent saved.';
+  }
+
+  async function duplicateAgent(agentId: string): Promise<void> {
+    const response = await postJSON<AgentResponse>(`/api/v1/agents/${agentId}/duplicate`);
+    agents = [response.agent, ...agents];
+    notice = 'Agent duplicated.';
+  }
+
+  async function deleteAgent(agentId: string): Promise<void> {
+    if (!confirm('Delete this agent? Existing conversations keep their messages.')) {
+      return;
+    }
+    await deleteJSON<{ ok: boolean }>(`/api/v1/agents/${agentId}`);
+    await refreshAgents();
+  }
+
+  async function refreshMemories(): Promise<void> {
+    const response = await getJSON<MemoriesResponse>('/api/v1/memories');
+    memories = response.memories;
+  }
+
+  async function createMemory(): Promise<void> {
+    const response = await postJSON<MemoryResponse>('/api/v1/memories', {
+      title: memoryTitle,
+      content: memoryContent,
+      tags: memoryTags
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+      scope: 'global',
+      importance: 70,
+      pinned: memoryPinned,
+      active: true,
+      source: 'manual'
+    });
+    memories = [response.memory, ...memories];
+    memoryTitle = '';
+    memoryContent = '';
+    memoryTags = '';
+    notice = 'Memory saved.';
+  }
+
+  async function deleteMemory(memoryId: string): Promise<void> {
+    if (!confirm('Delete this memory?')) {
+      return;
+    }
+    await deleteJSON<{ ok: boolean }>(`/api/v1/memories/${memoryId}`);
+    await refreshMemories();
+  }
+
+  async function rememberMessage(message: Message): Promise<void> {
+    const response = await postJSON<MemoryResponse>('/api/v1/memories', {
+      title: message.content.slice(0, 80) || 'Chat memory',
+      content: message.content,
+      tags: [],
+      scope: 'conversation',
+      conversation_id: selectedConversationId,
+      importance: 60,
+      pinned: false,
+      active: true,
+      source: 'message',
+      source_message_id: message.id
+    });
+    memories = [response.memory, ...memories];
+    notice = 'Memory created from message.';
   }
 
   function messageFromError(error: unknown): string {
@@ -640,6 +814,12 @@
                     <option value={provider.id}>{provider.name}</option>
                   {/each}
                 </select>
+                <select bind:value={selectedAgentId}>
+                  <option value="">No agent</option>
+                  {#each agents as agent (agent.id)}
+                    <option value={agent.id}>{agent.name}</option>
+                  {/each}
+                </select>
                 <select bind:value={selectedModel}>
                   <option value="">Manual model</option>
                   {#each providerModels as model (model.id)}
@@ -664,10 +844,24 @@
                       {#if message.total_tokens}
                         <small>{message.total_tokens} tokens</small>
                       {/if}
+                      {#if message.content}
+                        <button on:click={() => rememberMessage(message)} type="button">{strings.chat.remember}</button>
+                      {/if}
                     </article>
                   {/each}
                 {/if}
               </div>
+              {#if runMemories.length > 0}
+                <details class="memory-panel" open>
+                  <summary>{strings.chat.memoriesUsed}</summary>
+                  {#each runMemories as memory (memory.id)}
+                    <article>
+                      <strong>{memory.title}</strong>
+                      <p>{memory.content}</p>
+                    </article>
+                  {/each}
+                </details>
+              {/if}
               <form class="composer" on:submit|preventDefault={sendMessage}>
                 <textarea bind:value={composer} placeholder={strings.chat.composerPlaceholder}></textarea>
                 <div>
@@ -677,6 +871,101 @@
                   <button disabled={submitting || !composer.trim()} type="submit">{strings.chat.send}</button>
                 </div>
               </form>
+            </section>
+          </section>
+        {:else if activeView === strings.nav.agents}
+          <section class="providers-layout">
+            <form class="panel" on:submit|preventDefault={createAgent}>
+              <h2>{strings.agents.add}</h2>
+              <label>
+                Name
+                <input bind:value={agentName} required />
+              </label>
+              <label>
+                System prompt
+                <textarea bind:value={agentPrompt} required></textarea>
+              </label>
+              <label>
+                Memory mode
+                <select bind:value={agentMemoryMode}>
+                  <option value="none">none</option>
+                  <option value="pinned_only">pinned_only</option>
+                  <option value="relevant">relevant</option>
+                  <option value="all">all</option>
+                </select>
+              </label>
+              <button type="submit">{strings.agents.add}</button>
+            </form>
+            <section class="panel">
+              <div class="panel-heading">
+                <h2>Agents</h2>
+                <button on:click={refreshAgents} type="button">Refresh</button>
+              </div>
+              {#if agents.length === 0}
+                <p>{strings.agents.noAgents}</p>
+              {:else}
+                <div class="table-list">
+                  {#each agents as agent (agent.id)}
+                    <article>
+                      <div>
+                        <strong>{agent.name}</strong>
+                        <span>{agent.memory_access_mode} / {agent.active ? 'active' : 'disabled'}</span>
+                      </div>
+                      <div>
+                        <button on:click={() => duplicateAgent(agent.id)} type="button">{strings.agents.duplicate}</button>
+                        <button on:click={() => deleteAgent(agent.id)} type="button">Delete</button>
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+              {/if}
+            </section>
+          </section>
+        {:else if activeView === strings.nav.memories}
+          <section class="providers-layout">
+            <form class="panel" on:submit|preventDefault={createMemory}>
+              <h2>{strings.memories.add}</h2>
+              <label>
+                Title
+                <input bind:value={memoryTitle} required />
+              </label>
+              <label>
+                Content
+                <textarea bind:value={memoryContent} required></textarea>
+              </label>
+              <label>
+                Tags
+                <input bind:value={memoryTags} placeholder="project, preference" />
+              </label>
+              <label class="inline-check">
+                <input bind:checked={memoryPinned} type="checkbox" />
+                {strings.memories.pin}
+              </label>
+              <button type="submit">{strings.memories.add}</button>
+            </form>
+            <section class="panel">
+              <div class="panel-heading">
+                <h2>Memories</h2>
+                <button on:click={refreshMemories} type="button">Refresh</button>
+              </div>
+              {#if memories.length === 0}
+                <p>{strings.memories.noMemories}</p>
+              {:else}
+                <div class="table-list">
+                  {#each memories as memory (memory.id)}
+                    <article>
+                      <div>
+                        <strong>{memory.title}</strong>
+                        <span>{memory.scope} / {memory.pinned ? 'pinned' : 'unpinned'} / used {memory.use_count}</span>
+                        <span>{memory.tags.join(', ')}</span>
+                      </div>
+                      <div>
+                        <button on:click={() => deleteMemory(memory.id)} type="button">{strings.memories.delete}</button>
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+              {/if}
             </section>
           </section>
         {:else if activeView === strings.nav.providers}
@@ -735,11 +1024,11 @@
             </section>
           </section>
         {:else}
-        <section class="panel" aria-labelledby="screen-title">
-          <p class="eyebrow">{strings.workspace.title}</p>
-          <h2 id="screen-title">{activeView}</h2>
-          <p>{strings.workspace.emptyScreen}</p>
-        </section>
+          <section class="panel" aria-labelledby="screen-title">
+            <p class="eyebrow">{strings.workspace.title}</p>
+            <h2 id="screen-title">{activeView}</h2>
+            <p>{strings.workspace.emptyScreen}</p>
+          </section>
         {/if}
       {/if}
     </section>

@@ -16,9 +16,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/yuricunha/nostos/internal/agents"
 	"github.com/yuricunha/nostos/internal/chat"
 	"github.com/yuricunha/nostos/internal/config"
 	"github.com/yuricunha/nostos/internal/health"
+	"github.com/yuricunha/nostos/internal/memory"
 	"github.com/yuricunha/nostos/internal/providers"
 )
 
@@ -29,6 +31,8 @@ type RouterDeps struct {
 	Auth      AuthDeps
 	Providers *providers.Service
 	Chat      *chat.Service
+	Agents    *agents.Service
+	Memories  *memory.Service
 }
 
 type APIError struct {
@@ -68,7 +72,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 		if deps.Auth.Auth != nil {
 			newAuthHandler(deps.Auth).Routes(r)
 		}
-		if deps.Auth.Auth != nil && (deps.Providers != nil || deps.Chat != nil) {
+		if deps.Auth.Auth != nil && (deps.Providers != nil || deps.Chat != nil || deps.Agents != nil || deps.Memories != nil) {
 			r.Group(func(r chi.Router) {
 				authHandler := newAuthHandler(deps.Auth)
 				r.Use(authHandler.requireAuth)
@@ -78,6 +82,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 				}
 				if deps.Chat != nil {
 					newChatHandler(deps.Chat).Routes(r)
+				}
+				if deps.Agents != nil {
+					newAgentsHandler(deps.Agents).Routes(r)
+				}
+				if deps.Memories != nil {
+					newMemoriesHandler(deps.Memories).Routes(r)
 				}
 			})
 		}

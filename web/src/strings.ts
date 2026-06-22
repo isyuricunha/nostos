@@ -38,7 +38,9 @@ export const strings = {
     stop: 'Stop',
     composerPlaceholder: 'Send a message...',
     noMessages: 'No messages yet.',
-    noConversations: 'No conversations yet.'
+    noConversations: 'No conversations yet.',
+    memoriesUsed: 'Memories used in this response',
+    remember: 'Remember'
   },
   providers: {
     title: 'Providers',
@@ -47,5 +49,16 @@ export const strings = {
     refreshModels: 'Refresh models',
     noProviders: 'No providers configured yet.',
     apiKeyHelp: 'API keys are encrypted before storage. Use env:NAME to read from an environment variable.'
+  },
+  agents: {
+    add: 'Add agent',
+    noAgents: 'No agents configured yet.',
+    duplicate: 'Duplicate'
+  },
+  memories: {
+    add: 'Add memory',
+    noMemories: 'No memories yet.',
+    pin: 'Pin',
+    delete: 'Delete'
   }
 } as const;
