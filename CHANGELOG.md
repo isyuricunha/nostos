@@ -23,5 +23,5 @@
 
 ### Not Yet Released
 
-- The repository has not been pushed or tagged in this remediation pass.
-- GitHub Actions has not been verified for these local commits.
+- GitHub Actions passed for the pushed remediation commits.
+- The release tag has not been created.
