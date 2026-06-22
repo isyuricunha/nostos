@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import DOMPurify from 'dompurify';
+  import { marked } from 'marked';
   import { deleteJSON, getJSON, postJSON, postStream, putJSON } from './lib/api';
   import { strings } from './strings';
 
@@ -1049,6 +1051,15 @@
     selectedReplySourceId = '';
   }
 
+  function renderMarkdown(content: string): string {
+    const rendered = marked.parse(content, {
+      async: false,
+      breaks: true,
+      gfm: true
+    });
+    return DOMPurify.sanitize(rendered);
+  }
+
   function messageFromError(error: unknown): string {
     return error instanceof Error ? error.message : 'The request failed.';
   }
@@ -1338,7 +1349,8 @@
                           <span>{message.model}</span>
                         {/if}
                       </header>
-                      <p>{message.content}</p>
+                      <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                      <div class="markdown-body">{@html renderMarkdown(message.content)}</div>
                       {#if message.total_tokens}
                         <small>{message.total_tokens} tokens</small>
                       {/if}

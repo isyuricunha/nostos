@@ -413,9 +413,63 @@ dd {
   text-transform: capitalize;
 }
 
-.message p {
+.markdown-body {
   margin: 8px 0 0;
   color: var(--text);
+}
+
+.markdown-body :where(p, ul, ol, blockquote, pre, table) {
+  margin: 8px 0 0;
+}
+
+.markdown-body :where(ul, ol) {
+  padding-left: 20px;
+}
+
+.markdown-body blockquote {
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+  padding-left: 10px;
+}
+
+.markdown-body code {
+  background: #050505;
+  border: 1px solid var(--border-muted);
+  border-radius: 4px;
+  color: var(--accent-strong);
+  padding: 1px 4px;
+}
+
+.markdown-body pre {
+  background: #050505;
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  overflow: auto;
+  padding: 10px;
+}
+
+.markdown-body pre code {
+  border: 0;
+  padding: 0;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.markdown-body :where(th, td) {
+  border: 1px solid var(--border-muted);
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.markdown-body a {
+  color: var(--accent-strong);
+}
+
+.message p {
+  margin: 8px 0 0;
   white-space: pre-wrap;
 }
 
