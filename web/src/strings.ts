@@ -60,5 +60,11 @@ export const strings = {
     noMemories: 'No memories yet.',
     pin: 'Pin',
     delete: 'Delete'
+  },
+  mcp: {
+    add: 'Add MCP server',
+    discover: 'Discover tools',
+    noServers: 'No MCP servers configured yet.',
+    noTools: 'No tools discovered yet.'
   }
 } as const;

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { deleteJSON, getJSON, postJSON, postStream } from './lib/api';
+  import { deleteJSON, getJSON, postJSON, postStream, putJSON } from './lib/api';
   import { strings } from './strings';
 
   type User = {
@@ -92,6 +92,25 @@
     score: number;
   };
 
+  type MCPServer = {
+    id: string;
+    name: string;
+    transport_type: string;
+    command?: string;
+    http_url?: string;
+    enabled: boolean;
+    health_status: string;
+    last_error?: string;
+  };
+
+  type MCPTool = {
+    id: string;
+    server_id: string;
+    name: string;
+    description: string;
+    permission_mode: string;
+  };
+
   type ReadyStatus = {
     ready: boolean;
     version: string;
@@ -155,6 +174,18 @@
     memory: Memory;
   };
 
+  type MCPServersResponse = {
+    servers: MCPServer[];
+  };
+
+  type MCPServerResponse = {
+    server: MCPServer;
+  };
+
+  type MCPToolsResponse = {
+    tools: MCPTool[];
+  };
+
   const navItems = [
     strings.nav.chat,
     strings.nav.agents,
@@ -175,6 +206,8 @@
   let messages: Message[] = [];
   let agents: Agent[] = [];
   let memories: Memory[] = [];
+  let mcpServers: MCPServer[] = [];
+  let mcpTools: MCPTool[] = [];
   let runMemories: MemorySnippet[] = [];
   let selectedConversationId = '';
   let selectedAgentId = '';
@@ -206,6 +239,12 @@
   let memoryContent = '';
   let memoryTags = '';
   let memoryPinned = true;
+  let mcpName = '';
+  let mcpTransport = 'http';
+  let mcpHttpUrl = '';
+  let mcpCommand = '';
+  let mcpArguments = '';
+  let mcpAuthorization = '';
 
   onMount(async () => {
     await refreshAppState();
@@ -255,6 +294,7 @@
       refreshProviders(),
       refreshAgents(),
       refreshMemories(),
+      refreshMCP(),
       refreshConversations()
     ]);
   }
@@ -609,6 +649,54 @@
     notice = 'Memory created from message.';
   }
 
+  async function refreshMCP(): Promise<void> {
+    const [serversResponse, toolsResponse] = await Promise.all([
+      getJSON<MCPServersResponse>('/api/v1/mcp-servers'),
+      getJSON<MCPToolsResponse>('/api/v1/mcp-tools')
+    ]);
+    mcpServers = serversResponse.servers;
+    mcpTools = toolsResponse.tools;
+  }
+
+  async function createMCPServer(): Promise<void> {
+    const headers: Record<string, string> = {};
+    if (mcpAuthorization.trim()) {
+      headers.Authorization = mcpAuthorization.trim();
+    }
+    const response = await postJSON<MCPServerResponse>('/api/v1/mcp-servers', {
+      name: mcpName,
+      description: '',
+      transport_type: mcpTransport,
+      http_url: mcpHttpUrl,
+      command: mcpCommand,
+      arguments: mcpArguments.split(' ').filter(Boolean),
+      http_headers: headers,
+      environment: {},
+      enabled: true,
+      startup_timeout_ms: 10000,
+      request_timeout_ms: 30000
+    });
+    mcpServers = [response.server, ...mcpServers];
+    mcpName = '';
+    mcpHttpUrl = '';
+    mcpCommand = '';
+    mcpArguments = '';
+    mcpAuthorization = '';
+    notice = 'MCP server saved.';
+  }
+
+  async function discoverMCPTools(serverId: string): Promise<void> {
+    const response = await postJSON<MCPToolsResponse>(`/api/v1/mcp-servers/${serverId}/discover`);
+    mcpTools = [...response.tools, ...mcpTools.filter((tool) => tool.server_id !== serverId)];
+    await refreshMCP();
+    notice = 'MCP tools discovered.';
+  }
+
+  async function updateToolPermission(toolId: string, permissionMode: string): Promise<void> {
+    await putJSON<{ ok: boolean }>(`/api/v1/mcp-tools/${toolId}/permission`, { permission_mode: permissionMode });
+    await refreshMCP();
+  }
+
   function messageFromError(error: unknown): string {
     return error instanceof Error ? error.message : 'The request failed.';
   }
@@ -961,6 +1049,97 @@
                       </div>
                       <div>
                         <button on:click={() => deleteMemory(memory.id)} type="button">{strings.memories.delete}</button>
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+              {/if}
+            </section>
+          </section>
+        {:else if activeView === strings.nav.mcp}
+          <section class="providers-layout">
+            <form class="panel" on:submit|preventDefault={createMCPServer}>
+              <h2>{strings.mcp.add}</h2>
+              <label>
+                Name
+                <input bind:value={mcpName} required />
+              </label>
+              <label>
+                Transport
+                <select bind:value={mcpTransport}>
+                  <option value="http">http</option>
+                  <option value="stdio">stdio</option>
+                </select>
+              </label>
+              {#if mcpTransport === 'http'}
+                <label>
+                  HTTP URL
+                  <input bind:value={mcpHttpUrl} placeholder="http://localhost:9000/mcp" required />
+                </label>
+                <label>
+                  Authorization header
+                  <input bind:value={mcpAuthorization} autocomplete="off" placeholder="Bearer token" type="password" />
+                </label>
+              {:else}
+                <label>
+                  Command
+                  <input bind:value={mcpCommand} required />
+                </label>
+                <label>
+                  Arguments
+                  <input bind:value={mcpArguments} placeholder="--stdio" />
+                </label>
+              {/if}
+              <button type="submit">{strings.mcp.add}</button>
+            </form>
+            <section class="panel">
+              <div class="panel-heading">
+                <h2>MCP servers</h2>
+                <button on:click={refreshMCP} type="button">Refresh</button>
+              </div>
+              {#if mcpServers.length === 0}
+                <p>{strings.mcp.noServers}</p>
+              {:else}
+                <div class="table-list">
+                  {#each mcpServers as server (server.id)}
+                    <article>
+                      <div>
+                        <strong>{server.name}</strong>
+                        <span>{server.transport_type} / {server.health_status}</span>
+                        {#if server.last_error}
+                          <span>{server.last_error}</span>
+                        {/if}
+                      </div>
+                      <div>
+                        <button on:click={() => discoverMCPTools(server.id)} type="button">{strings.mcp.discover}</button>
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+              {/if}
+              <div class="panel-heading nested-heading">
+                <h2>Tools</h2>
+              </div>
+              {#if mcpTools.length === 0}
+                <p>{strings.mcp.noTools}</p>
+              {:else}
+                <div class="table-list">
+                  {#each mcpTools as tool (tool.id)}
+                    <article>
+                      <div>
+                        <strong>{tool.name}</strong>
+                        <span>{tool.description}</span>
+                      </div>
+                      <div>
+                        <select
+                          aria-label={`Permission for ${tool.name}`}
+                          value={tool.permission_mode}
+                          on:change={(event) => updateToolPermission(tool.id, event.currentTarget.value)}
+                        >
+                          <option value="deny">deny</option>
+                          <option value="ask">ask</option>
+                          <option value="allow">allow</option>
+                        </select>
                       </div>
                     </article>
                   {/each}

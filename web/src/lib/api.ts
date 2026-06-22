@@ -15,6 +15,10 @@ export async function postJSON<T>(path: string, body?: unknown): Promise<T> {
   return requestJSON<T>('POST', path, body);
 }
 
+export async function putJSON<T>(path: string, body?: unknown): Promise<T> {
+  return requestJSON<T>('PUT', path, body);
+}
+
 export async function deleteJSON<T>(path: string): Promise<T> {
   return requestJSON<T>('DELETE', path);
 }

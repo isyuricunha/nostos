@@ -19,6 +19,7 @@ import (
 	"github.com/yuricunha/nostos/internal/database"
 	"github.com/yuricunha/nostos/internal/health"
 	"github.com/yuricunha/nostos/internal/logging"
+	"github.com/yuricunha/nostos/internal/mcp"
 	"github.com/yuricunha/nostos/internal/memory"
 	"github.com/yuricunha/nostos/internal/providers"
 	"github.com/yuricunha/nostos/internal/worker"
@@ -83,6 +84,7 @@ func run(args []string) error {
 		return err
 	}
 	memoryService := memory.NewService(memory.NewSQLRepository(store))
+	mcpService := mcp.NewService(cfg, mcp.NewSQLRepository(store), authRepo, mcp.NewClient())
 	chatRepo := chat.NewSQLRepository(store)
 	chatService := chat.NewService(cfg, chatRepo, providerService, providerClient, agentService, memoryService)
 	if err := chatService.CleanupInterruptedRuns(ctx); err != nil {
@@ -101,7 +103,7 @@ func run(args []string) error {
 	case "worker":
 		return runWorker(ctx, cfg, logger, store)
 	case "server":
-		return runServer(ctx, cfg, logger, store, authService, providerService, chatService, agentService, memoryService)
+		return runServer(ctx, cfg, logger, store, authService, providerService, chatService, agentService, memoryService, mcpService)
 	default:
 		return nil
 	}
@@ -117,6 +119,7 @@ func runServer(
 	chatService *chat.Service,
 	agentService *agents.Service,
 	memoryService *memory.Service,
+	mcpService *mcp.Service,
 ) error {
 	healthService := health.NewService(store, version, buildCommit, buildTimestamp)
 	handler := api.NewRouter(api.RouterDeps{
@@ -131,6 +134,7 @@ func runServer(
 		Chat:      chatService,
 		Agents:    agentService,
 		Memories:  memoryService,
+		MCP:       mcpService,
 	})
 
 	server := &http.Server{
