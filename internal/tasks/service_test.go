@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/isyuricunha/nostos/internal/auth"
+	"github.com/isyuricunha/nostos/internal/chat"
 	"github.com/isyuricunha/nostos/internal/config"
 	"github.com/isyuricunha/nostos/internal/database"
 	"github.com/isyuricunha/nostos/internal/providers"
@@ -93,6 +94,121 @@ func TestAgentTaskRunExecutesThroughProvider(t *testing.T) {
 	}
 	if len(record.Events) != 2 {
 		t.Fatalf("expected start and success events, got %#v", record.Events)
+	}
+}
+
+func TestAgentTaskUsesAgentMemoriesAndAllowedTool(t *testing.T) {
+	ctx := context.Background()
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			requestCount++
+			var body struct {
+				Messages []providers.ChatMessage `json:"messages"`
+				Tools    []providers.ChatTool    `json:"tools"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode provider request: %v", err)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			if requestCount == 1 {
+				if !taskMessagesContain(body.Messages, "Use the task agent.") || !taskMessagesContain(body.Messages, "Memory: prefer tool-backed checks") {
+					t.Fatalf("agent prompt or memory missing from provider request: %#v", body.Messages)
+				}
+				if len(body.Tools) != 1 || body.Tools[0].Function.Name != "lookup_status" {
+					t.Fatalf("allowed task tool missing: %#v", body.Tools)
+				}
+				fmt.Fprintln(w, `data: {"choices":[{"delta":{"tool_calls":[{"id":"task_call_1","type":"function","function":{"name":"lookup_status","arguments":"{\"service\":\"api\"}"}}]},"finish_reason":"tool_calls"}]}`)
+				fmt.Fprintln(w)
+				fmt.Fprintln(w, `data: [DONE]`)
+				return
+			}
+			if !taskMessagesContainToolResult(body.Messages, "task_call_1", "api is healthy") {
+				t.Fatalf("tool result missing from follow-up request: %#v", body.Messages)
+			}
+			fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"Task used tool."}}]}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: [DONE]`)
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "mock-model"}}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newTaskTestContext(t)
+	defer cleanup()
+	authRepo := auth.NewSQLRepository(store)
+	client := providers.NewOpenAIClient()
+	providerService := providers.NewService(cfg, providers.NewSQLRepository(store), authRepo, client)
+	apiKey := "test-api-key"
+	provider, err := providerService.Create(ctx, providers.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, providers.ProviderInput{
+		Name:             "Mock",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	agentID := seedTaskAgent(t, ctx, store, user.WorkspaceID, provider.ID)
+	executions := 0
+	service := NewService(cfg, NewSQLRepository(store), authRepo).
+		WithProviderClient(providerService, client).
+		WithAgentRuntime(
+			fakeTaskAgentResolver{agent: chat.AgentContext{
+				ID:                    agentID,
+				SystemPrompt:          "Use the task agent.",
+				DefaultProviderID:     provider.ID,
+				DefaultModel:          "mock-model",
+				MemoryAccessMode:      "pinned_only",
+				ToolPermissionDefault: chat.ToolPermissionAsk,
+				MaxToolIterations:     4,
+				Temperature:           0.7,
+				Active:                true,
+			}},
+			fakeTaskMemoryProvider{snippets: []chat.MemorySnippet{{ID: "memory_1", Title: "Memory", Content: "prefer tool-backed checks", Score: 1}}},
+			&fakeTaskToolProvider{permission: chat.ToolPermissionAllow, executions: &executions},
+		)
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	task, _, err := service.CreateTask(ctx, principal, TaskInput{
+		Name:              "Agent task",
+		TaskType:          TaskTypeAgent,
+		State:             TaskEnabled,
+		AgentID:           agentID,
+		Prompt:            "Check API status.",
+		ScheduleMode:      "manual",
+		ToolPolicy:        "use_preapproved_tools_only",
+		ConcurrencyPolicy: "skip",
+		MaxRetries:        1,
+		TimeoutMS:         30000,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := service.RunNow(ctx, principal, task.ID); err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	if err := service.ClaimAndExecute(ctx, "worker-test"); err != nil {
+		t.Fatalf("claim and execute: %v", err)
+	}
+	runs, err := service.ListRuns(ctx, principal, task.ID)
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	if len(runs) != 1 || runs[0].State != RunSucceeded || runs[0].Result != "Task used tool." || executions != 1 || requestCount != 2 {
+		t.Fatalf("unexpected agent task result runs=%#v executions=%d requests=%d", runs, executions, requestCount)
+	}
+	record, err := service.GetRunRecord(ctx, principal, runs[0].ID)
+	if err != nil {
+		t.Fatalf("get run record: %v", err)
+	}
+	if !taskEventsContain(record.Events, "Task injected 1 explicit memories.") || !taskEventsContain(record.Events, "Executing tool lookup_status.") {
+		t.Fatalf("expected memory and tool events, got %#v", record.Events)
 	}
 }
 
@@ -351,6 +467,91 @@ type fakeSummaryMaintenance struct {
 func (f *fakeSummaryMaintenance) UpdateConversationSummaries(ctx context.Context, limit int) (string, error) {
 	f.calls++
 	return "conversation summaries processed=0 failed=0", nil
+}
+
+type fakeTaskAgentResolver struct {
+	agent chat.AgentContext
+}
+
+func (f fakeTaskAgentResolver) GetChatAgent(ctx context.Context, workspaceID string, agentID string) (chat.AgentContext, error) {
+	return f.agent, nil
+}
+
+type fakeTaskMemoryProvider struct {
+	snippets []chat.MemorySnippet
+}
+
+func (f fakeTaskMemoryProvider) SelectForRun(ctx context.Context, request chat.MemoryRequest) ([]chat.MemorySnippet, error) {
+	return f.snippets, nil
+}
+
+type fakeTaskToolProvider struct {
+	permission string
+	executions *int
+}
+
+func (f fakeTaskToolProvider) RuntimeTools(ctx context.Context, request chat.ToolExposureRequest) ([]chat.RuntimeTool, error) {
+	mode := f.permission
+	if mode == "" {
+		mode = chat.ToolPermissionAllow
+	}
+	return []chat.RuntimeTool{{
+		ID:             "task_tool_1",
+		Name:           "lookup_status",
+		ProviderName:   "lookup_status",
+		Description:    "Look up service status.",
+		InputSchema:    `{"type":"object","properties":{"service":{"type":"string"}}}`,
+		PermissionMode: mode,
+	}}, nil
+}
+
+func (f fakeTaskToolProvider) ExecuteRuntimeTool(ctx context.Context, request chat.ToolExecutionRequest) (chat.ToolExecutionResult, error) {
+	if request.ProviderName != "lookup_status" || request.Arguments != `{"service":"api"}` {
+		return chat.ToolExecutionResult{}, fmt.Errorf("unexpected tool execution: %#v", request)
+	}
+	if f.executions != nil {
+		*f.executions++
+	}
+	return chat.ToolExecutionResult{Content: "api is healthy"}, nil
+}
+
+func seedTaskAgent(t *testing.T, ctx context.Context, store *database.Store, workspaceID string, providerID string) string {
+	t.Helper()
+	agentID := "task_agent_test"
+	now := store.NowArg(time.Now().UTC())
+	if _, err := store.DB.ExecContext(ctx, `INSERT INTO agents (id, workspace_id, name, system_prompt, default_provider_id, default_model, max_tool_iterations, memory_access_mode, tool_permission_default, active, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		agentID, workspaceID, "Task Agent", "Use the task agent.", providerID, "mock-model", 4, "pinned_only", "ask", true, now, now); err != nil {
+		t.Fatalf("seed task agent: %v", err)
+	}
+	return agentID
+}
+
+func taskMessagesContain(messages []providers.ChatMessage, value string) bool {
+	for _, message := range messages {
+		if strings.Contains(message.Content, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func taskMessagesContainToolResult(messages []providers.ChatMessage, toolCallID string, content string) bool {
+	for _, message := range messages {
+		if message.Role == "tool" && message.ToolCallID == toolCallID && message.Content == content {
+			return true
+		}
+	}
+	return false
+}
+
+func taskEventsContain(events []Event, message string) bool {
+	for _, event := range events {
+		if event.Message == message {
+			return true
+		}
+	}
+	return false
 }
 
 func newTaskTestContext(t *testing.T) (config.Config, *database.Store, auth.User, func()) {

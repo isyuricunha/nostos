@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/isyuricunha/nostos/internal/auth"
+	"github.com/isyuricunha/nostos/internal/chat"
 	"github.com/isyuricunha/nostos/internal/config"
 	"github.com/isyuricunha/nostos/internal/providers"
 )
@@ -24,6 +26,9 @@ type Service struct {
 	audit           auth.Repository
 	providers       ProviderResolver
 	client          *providers.OpenAIClient
+	agents          AgentResolver
+	memories        MemoryProvider
+	tools           ToolProvider
 	summaries       ConversationSummaryHandler
 	chatMaintenance ChatMaintenanceHandler
 	mcpHealth       MCPHealthHandler
@@ -31,6 +36,19 @@ type Service struct {
 
 type ProviderResolver interface {
 	ResolveForChat(ctx context.Context, workspaceID string, providerID string) (providers.Provider, string, error)
+}
+
+type AgentResolver interface {
+	GetChatAgent(ctx context.Context, workspaceID string, agentID string) (chat.AgentContext, error)
+}
+
+type MemoryProvider interface {
+	SelectForRun(ctx context.Context, request chat.MemoryRequest) ([]chat.MemorySnippet, error)
+}
+
+type ToolProvider interface {
+	RuntimeTools(ctx context.Context, request chat.ToolExposureRequest) ([]chat.RuntimeTool, error)
+	ExecuteRuntimeTool(ctx context.Context, request chat.ToolExecutionRequest) (chat.ToolExecutionResult, error)
 }
 
 type ConversationSummaryHandler interface {
@@ -57,6 +75,13 @@ func NewService(cfg config.Config, repo Repository, audit auth.Repository) *Serv
 func (s *Service) WithProviderClient(resolver ProviderResolver, client *providers.OpenAIClient) *Service {
 	s.providers = resolver
 	s.client = client
+	return s
+}
+
+func (s *Service) WithAgentRuntime(agentResolver AgentResolver, memoryProvider MemoryProvider, toolProvider ToolProvider) *Service {
+	s.agents = agentResolver
+	s.memories = memoryProvider
+	s.tools = toolProvider
 	return s
 }
 
@@ -309,7 +334,7 @@ func (s *Service) ClaimAndExecute(ctx context.Context, workerID string) error {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	result, execErr := s.execute(runCtx, task)
+	result, execErr := s.execute(runCtx, run, task)
 	if execErr != nil {
 		state := RunFailed
 		if errors.Is(execErr, context.DeadlineExceeded) {
@@ -466,12 +491,9 @@ func (s *Service) enqueueTask(ctx context.Context, task Task, scheduleID string,
 	})
 }
 
-func (s *Service) execute(ctx context.Context, task Task) (string, error) {
+func (s *Service) execute(ctx context.Context, run Run, task Task) (string, error) {
 	if task.TaskType == TaskTypeSystem {
 		return s.executeSystemTask(ctx, task)
-	}
-	if task.ProviderID == "" || task.Model == "" {
-		return "", errors.New("agent task requires provider_id and model")
 	}
 	if task.Prompt == "" {
 		return "", errors.New("agent task prompt is required")
@@ -479,39 +501,287 @@ func (s *Service) execute(ctx context.Context, task Task) (string, error) {
 	if s.providers == nil || s.client == nil {
 		return "", errors.New("provider execution is not configured")
 	}
-	provider, apiKey, err := s.providers.ResolveForChat(ctx, task.WorkspaceID, task.ProviderID)
+	return s.executeAgentTask(ctx, run, task)
+}
+
+func (s *Service) executeAgentTask(ctx context.Context, run Run, task Task) (string, error) {
+	agent, err := s.resolveTaskAgent(ctx, task)
 	if err != nil {
 		return "", err
 	}
-	events, err := s.client.StreamChat(ctx, providers.StreamRequest{
-		Provider: provider,
-		APIKey:   apiKey,
-		Model:    task.Model,
-		Messages: []providers.ChatMessage{
-			{Role: "system", Content: "You are executing an unattended workspace task. Return a concise result and do not request interactive approval."},
-			{Role: "user", Content: task.Prompt},
-		},
+	providerID := strings.TrimSpace(task.ProviderID)
+	if providerID == "" {
+		providerID = agent.DefaultProviderID
+	}
+	if providerID == "" {
+		return "", errors.New("agent task requires provider_id or agent default provider")
+	}
+	provider, apiKey, err := s.providers.ResolveForChat(ctx, task.WorkspaceID, providerID)
+	if err != nil {
+		return "", err
+	}
+	model := strings.TrimSpace(task.Model)
+	if model == "" {
+		model = agent.DefaultModel
+	}
+	if model == "" {
+		model = provider.DefaultModel
+	}
+	if model == "" {
+		return "", errors.New("agent task requires model or provider default model")
+	}
+	memories, err := s.selectTaskMemories(ctx, task, agent)
+	if err != nil {
+		return "", err
+	}
+	runtimeTools, err := s.taskRuntimeTools(ctx, task, agent)
+	if err != nil {
+		return "", err
+	}
+	if len(memories) > 0 {
+		_ = s.repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "info", Message: fmt.Sprintf("Task injected %d explicit memories.", len(memories))})
+	}
+	return s.executeTaskModelLoop(ctx, run, task, agent, provider, apiKey, model, memories, runtimeTools)
+}
+
+func (s *Service) resolveTaskAgent(ctx context.Context, task Task) (chat.AgentContext, error) {
+	if strings.TrimSpace(task.AgentID) == "" || s.agents == nil {
+		return chat.AgentContext{
+			SystemPrompt:          "You are executing an unattended workspace task. Return a concise result.",
+			MemoryAccessMode:      "pinned_only",
+			ToolPermissionDefault: chat.ToolPermissionAsk,
+			MaxToolIterations:     s.cfg.Chat.MaxToolIterations,
+			Temperature:           0.7,
+			Active:                true,
+		}, nil
+	}
+	agent, err := s.agents.GetChatAgent(ctx, task.WorkspaceID, task.AgentID)
+	if err != nil {
+		return chat.AgentContext{}, err
+	}
+	if agent.SystemPrompt == "" {
+		agent.SystemPrompt = "You are executing an unattended workspace task. Return a concise result."
+	}
+	if agent.MemoryAccessMode == "" {
+		agent.MemoryAccessMode = "pinned_only"
+	}
+	if agent.ToolPermissionDefault == "" {
+		agent.ToolPermissionDefault = chat.ToolPermissionAsk
+	}
+	if agent.MaxToolIterations <= 0 {
+		agent.MaxToolIterations = s.cfg.Chat.MaxToolIterations
+	}
+	if agent.Temperature <= 0 {
+		agent.Temperature = 0.7
+	}
+	return agent, nil
+}
+
+func (s *Service) selectTaskMemories(ctx context.Context, task Task, agent chat.AgentContext) ([]chat.MemorySnippet, error) {
+	if s.memories == nil {
+		return nil, nil
+	}
+	return s.memories.SelectForRun(ctx, chat.MemoryRequest{
+		WorkspaceID: task.WorkspaceID,
+		AgentID:     agent.ID,
+		AccessMode:  agent.MemoryAccessMode,
+		Query:       task.Prompt,
+	})
+}
+
+func (s *Service) taskRuntimeTools(ctx context.Context, task Task, agent chat.AgentContext) ([]chat.RuntimeTool, error) {
+	if s.tools == nil || agent.ID == "" {
+		return nil, nil
+	}
+	tools, err := s.tools.RuntimeTools(ctx, chat.ToolExposureRequest{
+		WorkspaceID:            task.WorkspaceID,
+		AgentID:                agent.ID,
+		AgentDefaultPermission: agent.ToolPermissionDefault,
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	var result strings.Builder
-	for event := range events {
-		if event.Error != nil {
-			return "", event.Error
+	if task.ToolPolicy == "use_preapproved_tools_only" {
+		allowed := tools[:0]
+		for _, tool := range tools {
+			if tool.PermissionMode == chat.ToolPermissionAllow {
+				allowed = append(allowed, tool)
+			}
 		}
-		if event.Type == "tool_call_ready" {
-			return "", errors.New("task stopped because tool approval would be required")
+		return allowed, nil
+	}
+	return tools, nil
+}
+
+func (s *Service) executeTaskModelLoop(
+	ctx context.Context,
+	run Run,
+	task Task,
+	agent chat.AgentContext,
+	provider providers.Provider,
+	apiKey string,
+	model string,
+	memories []chat.MemorySnippet,
+	runtimeTools []chat.RuntimeTool,
+) (string, error) {
+	messages := taskPromptMessages(agent, memories, task.Prompt)
+	toolByName := map[string]chat.RuntimeTool{}
+	for _, tool := range runtimeTools {
+		toolByName[tool.ProviderName] = tool
+	}
+	providerTools := taskProviderTools(runtimeTools)
+	maxIterations := agent.MaxToolIterations
+	if maxIterations <= 0 {
+		maxIterations = s.cfg.Chat.MaxToolIterations
+	}
+	if maxIterations <= 0 {
+		maxIterations = 8
+	}
+	var final strings.Builder
+	for iteration := 0; ; iteration++ {
+		events, err := s.client.StreamChat(ctx, providers.StreamRequest{
+			Provider:    provider,
+			APIKey:      apiKey,
+			Model:       model,
+			Messages:    messages,
+			Tools:       providerTools,
+			Temperature: agent.Temperature,
+		})
+		if err != nil {
+			if agent.FallbackModel != "" && model != agent.FallbackModel {
+				model = agent.FallbackModel
+				_ = s.repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "warn", Message: "Retrying task with agent fallback model."})
+				continue
+			}
+			return "", err
 		}
-		if event.Content != "" {
-			result.WriteString(event.Content)
+		content, toolCalls, err := consumeTaskStream(events)
+		if err != nil {
+			return "", err
+		}
+		if len(toolCalls) == 0 {
+			final.WriteString(content)
+			break
+		}
+		if iteration >= maxIterations {
+			return "", errors.New("task stopped because the tool iteration limit was reached")
+		}
+		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: content, ToolCalls: toolCalls})
+		for _, call := range toolCalls {
+			tool, ok := toolByName[call.Function.Name]
+			if !ok {
+				return "", fmt.Errorf("task requested unavailable tool %q", call.Function.Name)
+			}
+			if tool.PermissionMode != chat.ToolPermissionAllow {
+				return "", errors.New("task stopped because tool approval would be required")
+			}
+			_ = s.repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "info", Message: "Executing tool " + tool.Name + "."})
+			result, err := s.tools.ExecuteRuntimeTool(ctx, chat.ToolExecutionRequest{
+				WorkspaceID:     task.WorkspaceID,
+				ToolID:          tool.ID,
+				Arguments:       call.Function.Arguments,
+				Timeout:         time.Duration(task.TimeoutMS) * time.Millisecond,
+				MaxResultBytes:  32 * 1024,
+				ProviderName:    tool.ProviderName,
+				ToolDisplayName: tool.Name,
+			})
+			if err != nil {
+				return "", err
+			}
+			if result.Truncated {
+				_ = s.repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "warn", Message: "Tool result was truncated."})
+			}
+			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: call.ID, Content: result.Content})
 		}
 	}
-	text := strings.TrimSpace(result.String())
+	text := strings.TrimSpace(final.String())
 	if text == "" {
 		return "", errors.New("provider returned an empty task result")
 	}
 	return text, nil
+}
+
+func taskPromptMessages(agent chat.AgentContext, memories []chat.MemorySnippet, prompt string) []providers.ChatMessage {
+	messages := []providers.ChatMessage{
+		{Role: "system", Content: strings.TrimSpace(agent.SystemPrompt)},
+		{Role: "system", Content: "This is an unattended task. Do not wait for interactive approval; use only tools already available in this request."},
+	}
+	if len(memories) > 0 {
+		var builder strings.Builder
+		builder.WriteString("Explicit memories selected for this task:\n")
+		for _, memory := range memories {
+			builder.WriteString("- ")
+			builder.WriteString(memory.Title)
+			builder.WriteString(": ")
+			builder.WriteString(memory.Content)
+			builder.WriteString("\n")
+		}
+		messages = append(messages, providers.ChatMessage{Role: "system", Content: strings.TrimSpace(builder.String())})
+	}
+	messages = append(messages, providers.ChatMessage{Role: "user", Content: prompt})
+	return messages
+}
+
+func taskProviderTools(tools []chat.RuntimeTool) []providers.ChatTool {
+	out := make([]providers.ChatTool, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, providers.ChatTool{
+			Type: "function",
+			Function: providers.ChatToolFunction{
+				Name:        tool.ProviderName,
+				Description: tool.Description,
+				Parameters:  json.RawMessage(validTaskSchema(tool.InputSchema)),
+			},
+		})
+	}
+	return out
+}
+
+func validTaskSchema(schema string) string {
+	if strings.TrimSpace(schema) == "" || !json.Valid([]byte(schema)) {
+		return "{}"
+	}
+	return schema
+}
+
+func consumeTaskStream(events <-chan providers.StreamEvent) (string, []providers.ToolCall, error) {
+	var content strings.Builder
+	var calls []providers.ToolCall
+	for event := range events {
+		if event.Error != nil {
+			return "", nil, event.Error
+		}
+		switch event.Type {
+		case "content_delta":
+			content.WriteString(event.Content)
+		case "tool_call_delta":
+			if event.ToolCall != nil {
+				calls = mergeTaskToolCall(calls, *event.ToolCall)
+			}
+		case "run_completed":
+			return content.String(), calls, nil
+		}
+	}
+	return content.String(), calls, nil
+}
+
+func mergeTaskToolCall(calls []providers.ToolCall, next providers.ToolCall) []providers.ToolCall {
+	if next.ID == "" {
+		next.ID = next.Function.Name
+	}
+	if next.Type == "" {
+		next.Type = "function"
+	}
+	for index := range calls {
+		if calls[index].ID == next.ID {
+			if next.Function.Name != "" {
+				calls[index].Function.Name = next.Function.Name
+			}
+			calls[index].Function.Arguments += next.Function.Arguments
+			return calls
+		}
+	}
+	return append(calls, next)
 }
 
 func (s *Service) executeSystemTask(ctx context.Context, task Task) (string, error) {

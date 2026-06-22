@@ -16,7 +16,6 @@ import (
 	"github.com/isyuricunha/nostos/internal/config"
 	"github.com/isyuricunha/nostos/internal/database"
 	"github.com/isyuricunha/nostos/internal/providers"
-	"github.com/isyuricunha/nostos/internal/tasks"
 )
 
 func TestRunStreamsAndPersistsConversation(t *testing.T) {
@@ -306,14 +305,9 @@ func TestConversationSummaryQueueWorkerAndInjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
-	taskService := tasks.NewService(cfg, tasks.NewSQLRepository(store), authRepo).WithProviderClient(providerService, providerClient)
-	if err := taskService.EnsureSystemTasks(ctx); err != nil {
-		t.Fatalf("ensure system tasks: %v", err)
-	}
-	service := NewService(cfg, NewSQLRepository(store), providerService, providerClient, fakeAgentResolver{}, &fakeMemoryProvider{}).WithSummaryEnqueuer(taskService)
-	taskService.WithConversationSummaryHandler(service)
+	summaryEnqueuer := &fakeSummaryEnqueuer{}
+	service := NewService(cfg, NewSQLRepository(store), providerService, providerClient, fakeAgentResolver{}, &fakeMemoryProvider{}).WithSummaryEnqueuer(summaryEnqueuer)
 	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
-	taskPrincipal := tasks.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
 	conversation, err := service.CreateConversation(ctx, principal, Conversation{Title: "Summary chat", ProviderID: provider.ID, Model: "mock-model"})
 	if err != nil {
 		t.Fatalf("create conversation: %v", err)
@@ -331,16 +325,11 @@ func TestConversationSummaryQueueWorkerAndInjection(t *testing.T) {
 	if _, queued, err := service.QueueSummary(ctx, principal, conversation.ID); err != nil || queued {
 		t.Fatalf("duplicate summary queue should be ignored while queued, queued=%v err=%v", queued, err)
 	}
-	summaryTask := findTaskRecord(t, taskService, taskPrincipal, "update_conversation_summaries")
-	runs, err := taskService.ListRuns(ctx, taskPrincipal, summaryTask.Task.ID)
-	if err != nil {
-		t.Fatalf("list summary task runs: %v", err)
+	if summaryEnqueuer.calls != 1 || summaryEnqueuer.conversationID != conversation.ID {
+		t.Fatalf("summary queue was not deduplicated: %#v", summaryEnqueuer)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("expected one deduplicated summary run, got %d", len(runs))
-	}
-	if err := taskService.ClaimAndExecute(ctx, "summary-worker"); err != nil {
-		t.Fatalf("execute summary task: %v", err)
+	if _, err := service.UpdateConversationSummaries(ctx, 10); err != nil {
+		t.Fatalf("execute summary update: %v", err)
 	}
 	summarized, err := service.GetConversation(ctx, principal, conversation.ID)
 	if err != nil {
@@ -800,21 +789,6 @@ func containsToolResult(messages []providers.ChatMessage, id string, content str
 	return false
 }
 
-func findTaskRecord(t *testing.T, service *tasks.Service, principal tasks.PrincipalContext, name string) tasks.TaskRecord {
-	t.Helper()
-	records, err := service.ListTaskRecords(context.Background(), principal)
-	if err != nil {
-		t.Fatalf("list task records: %v", err)
-	}
-	for _, record := range records {
-		if record.Task.Name == name {
-			return record
-		}
-	}
-	t.Fatalf("task %q not found", name)
-	return tasks.TaskRecord{}
-}
-
 type fakeAgentResolver struct{}
 
 func (fakeAgentResolver) GetChatAgent(ctx context.Context, workspaceID string, agentID string) (AgentContext, error) {
@@ -833,6 +807,19 @@ type fakeMemoryProvider struct {
 	snippets      []MemorySnippet
 	recordedRunID string
 	recorded      []MemorySnippet
+}
+
+type fakeSummaryEnqueuer struct {
+	calls          int
+	workspaceID    string
+	conversationID string
+}
+
+func (f *fakeSummaryEnqueuer) EnqueueConversationSummary(ctx context.Context, workspaceID string, conversationID string) error {
+	f.calls++
+	f.workspaceID = workspaceID
+	f.conversationID = conversationID
+	return nil
 }
 
 type fakeToolProvider struct {

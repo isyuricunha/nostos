@@ -93,7 +93,9 @@ func run(args []string) error {
 	}
 	memoryService := memory.NewService(memory.NewSQLRepository(store))
 	mcpService := mcp.NewService(cfg, mcp.NewSQLRepository(store), authRepo, mcp.NewClient())
-	taskService := tasks.NewService(cfg, tasks.NewSQLRepository(store), authRepo).WithProviderClient(providerService, providerClient)
+	taskService := tasks.NewService(cfg, tasks.NewSQLRepository(store), authRepo).
+		WithProviderClient(providerService, providerClient).
+		WithAgentRuntime(agentService, memoryService, mcpService)
 	if err := taskService.EnsureSystemTasks(ctx); err != nil {
 		return err
 	}
