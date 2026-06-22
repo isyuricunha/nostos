@@ -123,12 +123,20 @@ export type ToolCall = {
 export type MCPServer = {
   id: string;
   name: string;
+  description: string;
   transport_type: string;
   command?: string;
+  arguments: string[];
+  working_directory?: string;
+  environment_keys?: string[];
   http_url?: string;
+  http_header_keys?: string[];
   enabled: boolean;
+  startup_timeout_ms: number;
+  request_timeout_ms: number;
   health_status: string;
   last_error?: string;
+  last_connected_at?: string;
 };
 
 export type MCPTool = {

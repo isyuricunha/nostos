@@ -143,12 +143,20 @@
   let memoryContent = '';
   let memoryTags = '';
   let memoryPinned = true;
+  let editingMCPServerId = '';
   let mcpName = '';
+  let mcpDescription = '';
   let mcpTransport = 'http';
   let mcpHttpUrl = '';
+  let mcpHttpHeaders = '';
   let mcpCommand = '';
   let mcpArguments = '';
+  let mcpWorkingDirectory = '';
+  let mcpEnvironment = '';
   let mcpAuthorization = '';
+  let mcpStartupTimeoutMS = 10000;
+  let mcpRequestTimeoutMS = 30000;
+  let mcpEnabled = true;
   let editingTaskId = '';
   let taskName = '';
   let taskDescription = '';
@@ -776,30 +784,79 @@
   }
 
   async function createMCPServer(): Promise<void> {
-    const headers: Record<string, string> = {};
+    const headers = parseHeaderText(mcpHttpHeaders);
     if (mcpAuthorization.trim()) {
       headers.Authorization = mcpAuthorization.trim();
     }
-    const response = await postJSON<MCPServerResponse>('/api/v1/mcp-servers', {
+    const payload = {
       name: mcpName,
-      description: '',
+      description: mcpDescription,
       transport_type: mcpTransport,
       http_url: mcpHttpUrl,
       command: mcpCommand,
       arguments: mcpArguments.split(' ').filter(Boolean),
+      working_directory: mcpWorkingDirectory,
       http_headers: headers,
-      environment: {},
-      enabled: true,
-      startup_timeout_ms: 10000,
-      request_timeout_ms: 30000
-    });
-    mcpServers = [response.server, ...mcpServers];
+      environment: parseHeaderText(mcpEnvironment),
+      enabled: mcpEnabled,
+      startup_timeout_ms: mcpStartupTimeoutMS,
+      request_timeout_ms: mcpRequestTimeoutMS
+    };
+    const serverBeingEdited = editingMCPServerId;
+    const response = serverBeingEdited
+      ? await putJSON<MCPServerResponse>(`/api/v1/mcp-servers/${serverBeingEdited}`, payload)
+      : await postJSON<MCPServerResponse>('/api/v1/mcp-servers', payload);
+    mcpServers = serverBeingEdited
+      ? mcpServers.map((server) => (server.id === response.server.id ? response.server : server))
+      : [response.server, ...mcpServers];
+    resetMCPServerForm();
+    notice = serverBeingEdited ? 'MCP server updated.' : 'MCP server saved.';
+  }
+
+  function editMCPServer(server: MCPServer): void {
+    editingMCPServerId = server.id;
+    mcpName = server.name;
+    mcpDescription = server.description;
+    mcpTransport = server.transport_type;
+    mcpHttpUrl = server.http_url ?? '';
+    mcpHttpHeaders = '';
+    mcpCommand = server.command ?? '';
+    mcpArguments = server.arguments.join(' ');
+    mcpWorkingDirectory = server.working_directory ?? '';
+    mcpEnvironment = '';
+    mcpAuthorization = '';
+    mcpStartupTimeoutMS = server.startup_timeout_ms;
+    mcpRequestTimeoutMS = server.request_timeout_ms;
+    mcpEnabled = server.enabled;
+  }
+
+  function resetMCPServerForm(): void {
+    editingMCPServerId = '';
     mcpName = '';
+    mcpDescription = '';
+    mcpTransport = 'http';
     mcpHttpUrl = '';
+    mcpHttpHeaders = '';
     mcpCommand = '';
     mcpArguments = '';
+    mcpWorkingDirectory = '';
+    mcpEnvironment = '';
     mcpAuthorization = '';
-    notice = 'MCP server saved.';
+    mcpStartupTimeoutMS = 10000;
+    mcpRequestTimeoutMS = 30000;
+    mcpEnabled = true;
+  }
+
+  async function deleteMCPServer(serverId: string): Promise<void> {
+    if (!confirm('Delete this MCP server and its discovered tools?')) {
+      return;
+    }
+    await deleteJSON<{ ok: boolean }>(`/api/v1/mcp-servers/${serverId}`);
+    if (editingMCPServerId === serverId) {
+      resetMCPServerForm();
+    }
+    await refreshMCP();
+    notice = 'MCP server deleted.';
   }
 
   async function discoverMCPTools(serverId: string): Promise<void> {
@@ -807,6 +864,12 @@
     mcpTools = [...response.tools, ...mcpTools.filter((tool) => tool.server_id !== serverId)];
     await refreshMCP();
     notice = 'MCP tools discovered.';
+  }
+
+  async function testMCPServer(serverId: string): Promise<void> {
+    await postJSON<MCPToolsResponse>(`/api/v1/mcp-servers/${serverId}/test`);
+    await refreshMCP();
+    notice = 'MCP server connection tested.';
   }
 
   async function updateToolPermission(toolId: string, permissionMode: string): Promise<void> {
@@ -1839,10 +1902,19 @@
         {:else if activeView === strings.nav.mcp}
           <section class="providers-layout">
             <form class="panel" on:submit|preventDefault={createMCPServer}>
-              <h2>{strings.mcp.add}</h2>
+              <div class="panel-heading">
+                <h2>{editingMCPServerId ? 'Edit MCP server' : strings.mcp.add}</h2>
+                {#if editingMCPServerId}
+                  <button on:click={resetMCPServerForm} type="button">Cancel edit</button>
+                {/if}
+              </div>
               <label>
                 Name
                 <input bind:value={mcpName} required />
+              </label>
+              <label>
+                Description
+                <input bind:value={mcpDescription} />
               </label>
               <label>
                 Transport
@@ -1857,6 +1929,10 @@
                   <input bind:value={mcpHttpUrl} placeholder="http://localhost:9000/mcp" required />
                 </label>
                 <label>
+                  HTTP headers JSON
+                  <textarea bind:value={mcpHttpHeaders} placeholder="Write-only replacement headers"></textarea>
+                </label>
+                <label>
                   Authorization header
                   <input bind:value={mcpAuthorization} autocomplete="off" placeholder="Bearer token" type="password" />
                 </label>
@@ -1869,8 +1945,28 @@
                   Arguments
                   <input bind:value={mcpArguments} placeholder="--stdio" />
                 </label>
+                <label>
+                  Working directory
+                  <input bind:value={mcpWorkingDirectory} />
+                </label>
+                <label>
+                  Environment JSON
+                  <textarea bind:value={mcpEnvironment} placeholder="Write-only replacement environment"></textarea>
+                </label>
               {/if}
-              <button type="submit">{strings.mcp.add}</button>
+              <label>
+                Startup timeout, milliseconds
+                <input bind:value={mcpStartupTimeoutMS} min="1000" type="number" />
+              </label>
+              <label>
+                Request timeout, milliseconds
+                <input bind:value={mcpRequestTimeoutMS} min="1000" type="number" />
+              </label>
+              <label class="inline-check">
+                <input bind:checked={mcpEnabled} type="checkbox" />
+                Enabled
+              </label>
+              <button type="submit">{editingMCPServerId ? 'Save MCP server' : strings.mcp.add}</button>
             </form>
             <section class="panel">
               <div class="panel-heading">
@@ -1886,12 +1982,25 @@
                       <div>
                         <strong>{server.name}</strong>
                         <span>{server.transport_type} / {server.health_status}</span>
+                        <span>{server.enabled ? 'enabled' : 'disabled'} / timeout {server.request_timeout_ms} ms</span>
+                        {#if server.environment_keys?.length}
+                          <span>environment keys: {server.environment_keys.join(', ')}</span>
+                        {/if}
+                        {#if server.http_header_keys?.length}
+                          <span>header keys: {server.http_header_keys.join(', ')}</span>
+                        {/if}
+                        {#if server.last_connected_at}
+                          <span>last connected {new Date(server.last_connected_at).toLocaleString()}</span>
+                        {/if}
                         {#if server.last_error}
                           <span>{server.last_error}</span>
                         {/if}
                       </div>
                       <div>
+                        <button on:click={() => editMCPServer(server)} type="button">Edit</button>
+                        <button on:click={() => testMCPServer(server.id)} type="button">Test</button>
                         <button on:click={() => discoverMCPTools(server.id)} type="button">{strings.mcp.discover}</button>
+                        <button on:click={() => deleteMCPServer(server.id)} type="button">Delete</button>
                       </div>
                     </article>
                   {/each}
