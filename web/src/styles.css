@@ -40,9 +40,73 @@ select {
   font: inherit;
 }
 
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
+}
+
+.auth-screen {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 20px;
+}
+
+.auth-panel {
+  display: grid;
+  width: min(100%, 420px);
+  gap: 14px;
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 24px;
+}
+
+.auth-panel h1 {
+  font-size: 1.6rem;
+}
+
+label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+input {
+  width: 100%;
+  border: 1px solid var(--border-muted);
+  border-radius: 7px;
+  background: #050505;
+  color: var(--text);
+  padding: 10px 11px;
+}
+
+button {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-strong);
+  color: var(--text);
+  padding: 9px 12px;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+.auth-panel button[type='submit'] {
+  background: var(--accent);
+  color: #160f05;
+  font-weight: 700;
 }
 
 .app-shell {
@@ -82,13 +146,18 @@ nav {
   gap: 4px;
 }
 
-nav a {
+nav button {
+  width: 100%;
+  border: 0;
   border-radius: 7px;
+  background: transparent;
   color: var(--muted);
   padding: 10px 12px;
+  text-align: left;
 }
 
-nav a:hover {
+nav button:hover,
+nav button.active {
   background: var(--panel);
   color: var(--text);
 }
@@ -105,6 +174,13 @@ nav a:hover {
   gap: 16px;
   border-bottom: 1px solid var(--border-muted);
   padding-bottom: 20px;
+}
+
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
 }
 
 .eyebrow {
@@ -152,6 +228,19 @@ h2 {
   padding: 20px;
 }
 
+.panel + .panel,
+.notice + .panel {
+  margin-top: 16px;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
 .panel p {
   color: var(--muted);
 }
@@ -184,11 +273,41 @@ dd {
 .notice {
   border: 1px solid var(--border);
   border-radius: 8px;
+  margin-top: 16px;
   padding: 12px;
 }
 
 .notice.error {
   color: var(--danger);
+}
+
+.notice.success {
+  color: var(--accent-strong);
+}
+
+.table-list {
+  display: grid;
+  gap: 10px;
+}
+
+.table-list article {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  padding: 12px;
+}
+
+.table-list article > div {
+  display: grid;
+  gap: 5px;
+}
+
+.table-list span {
+  color: var(--muted);
+  font-size: 0.88rem;
 }
 
 .skeleton {
@@ -223,12 +342,16 @@ dd {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
-  nav a {
+  nav button {
     text-align: center;
   }
 
   .topbar {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .table-list article {
     flex-direction: column;
   }
 }

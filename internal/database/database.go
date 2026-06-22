@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -80,6 +79,52 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.DB.Close()
+}
+
+func (s *Store) Placeholder(position int) string {
+	if s.Dialect == Postgres {
+		return fmt.Sprintf("$%d", position)
+	}
+	return "?"
+}
+
+func (s *Store) NowArg(t time.Time) any {
+	t = t.UTC()
+	if s.Dialect == SQLite {
+		return t.Format(time.RFC3339Nano)
+	}
+	return t
+}
+
+func ParseTime(value any) (time.Time, error) {
+	switch typed := value.(type) {
+	case nil:
+		return time.Time{}, nil
+	case time.Time:
+		return typed.UTC(), nil
+	case string:
+		return parseTimeString(typed)
+	case []byte:
+		return parseTimeString(string(typed))
+	default:
+		return time.Time{}, fmt.Errorf("unsupported timestamp type %T", value)
+	}
+}
+
+func parseTimeString(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.UTC(), nil
+	}
+	if parsed, err := time.Parse("2006-01-02 15:04:05.999999999Z07:00", value); err == nil {
+		return parsed.UTC(), nil
+	}
+	if parsed, err := time.Parse("2006-01-02 15:04:05.999999Z07:00", value); err == nil {
+		return parsed.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("invalid timestamp %q", value)
 }
 
 func RunMigrations(ctx context.Context, store *Store, root string) error {
@@ -175,19 +220,17 @@ func applyMigration(ctx context.Context, store *Store, version string, sqlText s
 }
 
 func sqliteDSN(path string) string {
+	pragmas := "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 	if strings.HasPrefix(path, "file:") {
 		if strings.Contains(path, "?") {
-			return path + "&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+			return path + "&" + pragmas
 		}
-		return path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+		return path + "?" + pragmas
 	}
-	escaped := url.PathEscape(path)
-	if filepath.IsAbs(path) {
-		escaped = "file://" + escaped
-	} else {
-		escaped = "file:" + escaped
+	if path == ":memory:" {
+		return "file::memory:?" + pragmas
 	}
-	return escaped + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	return "file:" + path + "?" + pragmas
 }
 
 func ensureSQLiteDirectory(path string) error {

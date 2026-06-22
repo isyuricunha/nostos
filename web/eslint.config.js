@@ -7,7 +7,8 @@ const browserGlobals = {
   document: 'readonly',
   fetch: 'readonly',
   Response: 'readonly',
-  window: 'readonly'
+  window: 'readonly',
+  confirm: 'readonly'
 };
 
 const testGlobals = {

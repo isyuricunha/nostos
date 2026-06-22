@@ -6,7 +6,7 @@ settings:
 
 importers:
 
-  .:
+  web:
     dependencies:
       dompurify:
         specifier: ^3.3.1

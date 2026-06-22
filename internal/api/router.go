@@ -24,6 +24,7 @@ type RouterDeps struct {
 	Config config.Config
 	Logger *slog.Logger
 	Health *health.Service
+	Auth   AuthDeps
 }
 
 type APIError struct {
@@ -42,6 +43,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Use(requestID)
 	r.Use(middleware.RealIP)
 	r.Use(securityHeaders)
+	r.Use(sameOrigin(deps.Config))
 	r.Use(requestLogger(deps.Logger))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(10 * time.Minute))
@@ -59,6 +61,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		if deps.Auth.Auth != nil {
+			newAuthHandler(deps.Auth).Routes(r)
+		}
 		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, deps.Health.Ready(r.Context()))
 		})

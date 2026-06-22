@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yuricunha/nostos/internal/api"
+	"github.com/yuricunha/nostos/internal/auth"
 	"github.com/yuricunha/nostos/internal/config"
 	"github.com/yuricunha/nostos/internal/database"
 	"github.com/yuricunha/nostos/internal/health"
@@ -68,6 +69,13 @@ func run(args []string) error {
 	if err := database.RunMigrations(ctx, store, cfg.MigrationsDir); err != nil {
 		return err
 	}
+	authRepo := auth.NewSQLRepository(store)
+	authService := auth.NewService(authRepo, cfg)
+	if bootstrapped, err := authService.BootstrapOwner(ctx); err != nil {
+		return err
+	} else if bootstrapped {
+		logger.Info("bootstrap owner created", "email", cfg.Security.BootstrapEmail)
+	}
 
 	switch command {
 	case "migrate":
@@ -88,6 +96,10 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, stor
 		Config: cfg,
 		Logger: logger,
 		Health: healthService,
+		Auth: api.AuthDeps{
+			Config: cfg,
+			Auth:   auth.NewService(auth.NewSQLRepository(store), cfg),
+		},
 	})
 
 	server := &http.Server{
