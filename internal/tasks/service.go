@@ -309,6 +309,10 @@ func (s *Service) EnqueueDueSchedules(ctx context.Context) error {
 		next := nextRun(schedule, now, s.cfg.Timezone)
 		schedule.LastEnqueuedOccurrence = occurrence.UTC().Format(time.RFC3339)
 		schedule.NextRunAt = next
+		if schedule.Mode == "one_time" {
+			schedule.Enabled = false
+			schedule.NextRunAt = nil
+		}
 		_ = s.repo.MarkScheduleEnqueued(ctx, schedule)
 	}
 	return nil
@@ -328,6 +332,9 @@ func (s *Service) ClaimAndExecute(ctx context.Context, workerID string) error {
 		return err
 	}
 	_ = s.repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "info", Message: "Task run started."})
+	leaseStop := make(chan struct{})
+	defer close(leaseStop)
+	go s.renewLeaseLoop(ctx, run.ID, workerID, s.leaseDuration(), leaseStop)
 	timeout := time.Duration(run.TimeoutMS) * time.Millisecond
 	if timeout <= 0 {
 		timeout = s.cfg.Tasks.DefaultTimeout
@@ -356,6 +363,38 @@ func (s *Service) ClaimAndExecute(ctx context.Context, workerID string) error {
 func (s *Service) RecoverExpiredLeases(ctx context.Context) error {
 	_, err := s.repo.RecoverExpiredLeases(ctx, time.Now().UTC())
 	return err
+}
+
+func (s *Service) renewLeaseLoop(ctx context.Context, runID string, workerID string, leaseDuration time.Duration, stop <-chan struct{}) {
+	if leaseDuration <= 0 {
+		leaseDuration = time.Minute
+	}
+	interval := leaseDuration / 3
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-ticker.C:
+			_ = s.repo.RenewLease(ctx, runID, workerID, time.Now().UTC().Add(leaseDuration))
+		}
+	}
+}
+
+func (s *Service) leaseDuration() time.Duration {
+	if s.cfg.Tasks.DefaultTimeout <= 0 {
+		return time.Minute
+	}
+	return s.cfg.Tasks.DefaultTimeout
 }
 
 func (s *Service) ensureSystemTasksForWorkspace(ctx context.Context, workspaceID string) error {
@@ -480,6 +519,22 @@ func (s *Service) normalizeInput(workspaceID string, input TaskInput) (Task, Sch
 }
 
 func (s *Service) enqueueTask(ctx context.Context, task Task, scheduleID string, key string, attempt int) (Run, error) {
+	if attempt == 0 {
+		switch task.ConcurrencyPolicy {
+		case "skip":
+			count, err := s.repo.ActiveRunCount(ctx, task.ID)
+			if err != nil {
+				return Run{}, err
+			}
+			if count > 0 {
+				return Run{}, fmt.Errorf("%w: active run already exists for task", ErrInvalidInput)
+			}
+		case "replace":
+			if _, err := s.repo.CancelActiveRuns(ctx, task.ID, "Replaced by a newer task occurrence."); err != nil {
+				return Run{}, err
+			}
+		}
+	}
 	return s.repo.EnqueueRun(ctx, Run{
 		TaskID:         task.ID,
 		ScheduleID:     scheduleID,

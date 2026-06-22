@@ -25,7 +25,10 @@ type Repository interface {
 	MarkScheduleEnqueued(ctx context.Context, schedule Schedule) error
 	EnqueueRun(ctx context.Context, run Run) (Run, error)
 	ClaimRun(ctx context.Context, workerID string, leaseUntil time.Time) (Run, error)
+	RenewLease(ctx context.Context, runID string, workerID string, leaseUntil time.Time) error
 	CompleteRun(ctx context.Context, runID string, state string, result string, errorMessage string) error
+	ActiveRunCount(ctx context.Context, taskID string) (int, error)
+	CancelActiveRuns(ctx context.Context, taskID string, reason string) (int64, error)
 	CancelRun(ctx context.Context, workspaceID string, runID string) error
 	ListRuns(ctx context.Context, workspaceID string, taskID string) ([]Run, error)
 	ListEvents(ctx context.Context, runID string) ([]Event, error)
@@ -192,8 +195,8 @@ func (r *SQLRepository) DueSchedules(ctx context.Context, now time.Time) ([]Sche
 
 func (r *SQLRepository) MarkScheduleEnqueued(ctx context.Context, schedule Schedule) error {
 	query := `UPDATE task_schedules SET last_enqueued_occurrence = ` + r.store.Placeholder(1) + `, next_run_at = ` + r.store.Placeholder(2) +
-		`, updated_at = ` + r.store.Placeholder(3) + ` WHERE id = ` + r.store.Placeholder(4)
-	_, err := r.store.DB.ExecContext(ctx, query, schedule.LastEnqueuedOccurrence, timePtrArg(r.store, schedule.NextRunAt), r.store.NowArg(time.Now().UTC()), schedule.ID)
+		`, enabled = ` + r.store.Placeholder(3) + `, updated_at = ` + r.store.Placeholder(4) + ` WHERE id = ` + r.store.Placeholder(5)
+	_, err := r.store.DB.ExecContext(ctx, query, schedule.LastEnqueuedOccurrence, timePtrArg(r.store, schedule.NextRunAt), schedule.Enabled, r.store.NowArg(time.Now().UTC()), schedule.ID)
 	return err
 }
 
@@ -246,12 +249,50 @@ RETURNING id, task_id, schedule_id, idempotency_key, state, attempt, max_retries
 	return run, tx.Commit()
 }
 
+func (r *SQLRepository) RenewLease(ctx context.Context, runID string, workerID string, leaseUntil time.Time) error {
+	query := `UPDATE task_runs SET lease_expires_at = ` + r.store.Placeholder(1) + `, updated_at = ` + r.store.Placeholder(2) +
+		` WHERE id = ` + r.store.Placeholder(3) + ` AND lease_owner = ` + r.store.Placeholder(4) +
+		` AND state = ` + r.store.Placeholder(5)
+	result, err := r.store.DB.ExecContext(ctx, query, r.store.NowArg(leaseUntil), r.store.NowArg(time.Now().UTC()), runID, workerID, RunRunning)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (r *SQLRepository) CompleteRun(ctx context.Context, runID string, state string, resultText string, errorMessage string) error {
 	now := time.Now().UTC()
 	query := `UPDATE task_runs SET state = ` + r.store.Placeholder(1) + `, result = ` + r.store.Placeholder(2) + `, error_message = ` + r.store.Placeholder(3) +
 		`, completed_at = ` + r.store.Placeholder(4) + `, lease_owner = NULL, lease_expires_at = NULL, updated_at = ` + r.store.Placeholder(5) + ` WHERE id = ` + r.store.Placeholder(6)
 	_, err := r.store.DB.ExecContext(ctx, query, state, nullableString(resultText), nullableString(errorMessage), r.store.NowArg(now), r.store.NowArg(now), runID)
 	return err
+}
+
+func (r *SQLRepository) ActiveRunCount(ctx context.Context, taskID string) (int, error) {
+	query := `SELECT COUNT(*) FROM task_runs WHERE task_id = ` + r.store.Placeholder(1) +
+		` AND state IN (` + r.store.Placeholder(2) + `, ` + r.store.Placeholder(3) + `, ` + r.store.Placeholder(4) + `, ` + r.store.Placeholder(5) + `)`
+	var count int
+	err := r.store.DB.QueryRowContext(ctx, query, taskID, RunQueued, RunClaimed, RunRunning, RunWaiting).Scan(&count)
+	return count, err
+}
+
+func (r *SQLRepository) CancelActiveRuns(ctx context.Context, taskID string, reason string) (int64, error) {
+	now := time.Now().UTC()
+	query := `UPDATE task_runs SET state = ` + r.store.Placeholder(1) + `, error_message = ` + r.store.Placeholder(2) +
+		`, completed_at = ` + r.store.Placeholder(3) + `, lease_owner = NULL, lease_expires_at = NULL, updated_at = ` + r.store.Placeholder(4) +
+		` WHERE task_id = ` + r.store.Placeholder(5) + ` AND state IN (` + r.store.Placeholder(6) + `, ` + r.store.Placeholder(7) + `, ` + r.store.Placeholder(8) + `, ` + r.store.Placeholder(9) + `)`
+	result, err := r.store.DB.ExecContext(ctx, query, RunCancelled, nullableString(reason), r.store.NowArg(now), r.store.NowArg(now), taskID, RunQueued, RunClaimed, RunRunning, RunWaiting)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (r *SQLRepository) CancelRun(ctx context.Context, workspaceID string, runID string) error {

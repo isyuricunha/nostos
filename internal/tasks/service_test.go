@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -273,6 +274,248 @@ func TestScheduleEnqueueAndLeaseRecovery(t *testing.T) {
 	}
 }
 
+func TestConcurrentClaimsExecuteRunsInParallel(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+		started <- struct{}{}
+		<-release
+		mu.Lock()
+		active--
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"done"}}]}`)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newTaskTestContext(t)
+	defer cleanup()
+	service, provider := newProviderBackedTaskService(t, ctx, cfg, store, user, server.URL)
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	for index := 0; index < 2; index++ {
+		task, _, err := service.CreateTask(ctx, principal, TaskInput{
+			Name:              fmt.Sprintf("Blocking %d", index),
+			TaskType:          TaskTypeAgent,
+			State:             TaskEnabled,
+			ProviderID:        provider.ID,
+			Model:             "mock-model",
+			Prompt:            "Run blocking task.",
+			ScheduleMode:      "manual",
+			ToolPolicy:        "use_preapproved_tools_only",
+			ConcurrencyPolicy: "skip",
+			MaxRetries:        0,
+			TimeoutMS:         30000,
+		})
+		if err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		if _, err := service.RunNow(ctx, principal, task.ID); err != nil {
+			t.Fatalf("run task: %v", err)
+		}
+	}
+	var wg sync.WaitGroup
+	for index := 0; index < 2; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			if err := service.ClaimAndExecute(ctx, fmt.Sprintf("worker-%d", index)); err != nil {
+				t.Errorf("claim and execute: %v", err)
+			}
+		}(index)
+	}
+	<-started
+	<-started
+	close(release)
+	wg.Wait()
+	mu.Lock()
+	observed := maxActive
+	mu.Unlock()
+	if observed < 2 {
+		t.Fatalf("expected overlapping task execution, max active=%d", observed)
+	}
+}
+
+func TestRunningTaskRenewsLease(t *testing.T) {
+	ctx := context.Background()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		close(started)
+		<-release
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"done"}}]}`)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newTaskTestContext(t)
+	defer cleanup()
+	cfg.Tasks.DefaultTimeout = 100 * time.Millisecond
+	service, provider := newProviderBackedTaskService(t, ctx, cfg, store, user, server.URL)
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	task, _, err := service.CreateTask(ctx, principal, TaskInput{
+		Name:              "Renewing task",
+		TaskType:          TaskTypeAgent,
+		State:             TaskEnabled,
+		ProviderID:        provider.ID,
+		Model:             "mock-model",
+		Prompt:            "Run long enough for renewal.",
+		ScheduleMode:      "manual",
+		ToolPolicy:        "use_preapproved_tools_only",
+		ConcurrencyPolicy: "skip",
+		MaxRetries:        0,
+		TimeoutMS:         1000,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	queued, err := service.RunNow(ctx, principal, task.ID)
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- service.ClaimAndExecute(ctx, "renew-worker")
+	}()
+	<-started
+	time.Sleep(260 * time.Millisecond)
+	running, err := NewSQLRepository(store).GetRun(ctx, queued.ID)
+	if err != nil {
+		t.Fatalf("get running run: %v", err)
+	}
+	if running.State != RunRunning || running.LeaseExpiresAt == nil || !running.LeaseExpiresAt.After(time.Now().UTC()) {
+		t.Fatalf("lease was not renewed: %#v", running)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("claim and execute: %v", err)
+	}
+}
+
+func TestConcurrencyPoliciesSkipAndReplace(t *testing.T) {
+	ctx := context.Background()
+	cfg, store, user, cleanup := newTaskTestContext(t)
+	defer cleanup()
+	service := NewService(cfg, NewSQLRepository(store), auth.NewSQLRepository(store))
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	skipTask, _, err := service.CreateTask(ctx, principal, TaskInput{
+		Name:              "Skip overlap",
+		TaskType:          TaskTypeSystem,
+		State:             TaskEnabled,
+		Prompt:            "cleanup_expired_sessions",
+		ScheduleMode:      "manual",
+		ToolPolicy:        "use_preapproved_tools_only",
+		ConcurrencyPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatalf("create skip task: %v", err)
+	}
+	if _, err := service.RunNow(ctx, principal, skipTask.ID); err != nil {
+		t.Fatalf("first skip run: %v", err)
+	}
+	if _, err := service.RunNow(ctx, principal, skipTask.ID); err == nil {
+		t.Fatal("expected second skip run to be rejected while first is queued")
+	}
+	replaceTask, _, err := service.CreateTask(ctx, principal, TaskInput{
+		Name:              "Replace overlap",
+		TaskType:          TaskTypeSystem,
+		State:             TaskEnabled,
+		Prompt:            "cleanup_expired_sessions",
+		ScheduleMode:      "manual",
+		ToolPolicy:        "use_preapproved_tools_only",
+		ConcurrencyPolicy: "replace",
+	})
+	if err != nil {
+		t.Fatalf("create replace task: %v", err)
+	}
+	first, err := service.RunNow(ctx, principal, replaceTask.ID)
+	if err != nil {
+		t.Fatalf("first replace run: %v", err)
+	}
+	second, err := service.RunNow(ctx, principal, replaceTask.ID)
+	if err != nil {
+		t.Fatalf("second replace run: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatal("replace policy did not enqueue a new run")
+	}
+	replaced, err := NewSQLRepository(store).GetRun(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("get replaced run: %v", err)
+	}
+	if replaced.State != RunCancelled {
+		t.Fatalf("replace policy did not cancel previous run: %#v", replaced)
+	}
+}
+
+func TestOneTimeScheduleDisablesAfterEnqueue(t *testing.T) {
+	ctx := context.Background()
+	cfg, store, user, cleanup := newTaskTestContext(t)
+	defer cleanup()
+	service := NewService(cfg, NewSQLRepository(store), auth.NewSQLRepository(store))
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	runAt := time.Now().UTC().Add(-time.Minute)
+	task, _, err := service.CreateTask(ctx, principal, TaskInput{
+		Name:              "One time",
+		TaskType:          TaskTypeSystem,
+		State:             TaskEnabled,
+		Prompt:            "cleanup_expired_sessions",
+		ScheduleMode:      "one_time",
+		RunAt:             runAt.Format(time.RFC3339),
+		ToolPolicy:        "use_preapproved_tools_only",
+		ConcurrencyPolicy: "allow",
+	})
+	if err != nil {
+		t.Fatalf("create one-time task: %v", err)
+	}
+	if err := service.EnqueueDueSchedules(ctx); err != nil {
+		t.Fatalf("enqueue due one-time: %v", err)
+	}
+	schedule, err := NewSQLRepository(store).GetSchedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	if schedule.Enabled || schedule.NextRunAt != nil {
+		t.Fatalf("one-time schedule was not disabled: %#v", schedule)
+	}
+	runs, err := service.ListRuns(ctx, principal, task.ID)
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected one run for one-time schedule, got %#v", runs)
+	}
+	if err := service.EnqueueDueSchedules(ctx); err != nil {
+		t.Fatalf("enqueue due one-time again: %v", err)
+	}
+	runs, err = service.ListRuns(ctx, principal, task.ID)
+	if err != nil {
+		t.Fatalf("list runs again: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("one-time schedule enqueued more than once: %#v", runs)
+	}
+}
+
 func TestInvalidSchedulesAreRejected(t *testing.T) {
 	ctx := context.Background()
 	cfg, store, user, cleanup := newTaskTestContext(t)
@@ -525,6 +768,30 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.Fatalf("seed task agent: %v", err)
 	}
 	return agentID
+}
+
+func newProviderBackedTaskService(t *testing.T, ctx context.Context, cfg config.Config, store *database.Store, user auth.User, providerURL string) (*Service, providers.Provider) {
+	t.Helper()
+	authRepo := auth.NewSQLRepository(store)
+	client := providers.NewOpenAIClient()
+	providerService := providers.NewService(cfg, providers.NewSQLRepository(store), authRepo, client)
+	apiKey := "test-api-key"
+	provider, err := providerService.Create(ctx, providers.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, providers.ProviderInput{
+		Name:             "Mock " + idSuffix(),
+		BaseURL:          providerURL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	return NewService(cfg, NewSQLRepository(store), authRepo).WithProviderClient(providerService, client), provider
+}
+
+func idSuffix() string {
+	return strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
 }
 
 func taskMessagesContain(messages []providers.ChatMessage, value string) bool {

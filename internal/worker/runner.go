@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/isyuricunha/nostos/internal/config"
@@ -42,7 +43,20 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.logger != nil {
 		r.logger.Info("worker started", "worker_id", workerID, "concurrency", r.cfg.Worker.Concurrency, "poll_interval", r.cfg.Worker.PollInterval.String())
 	}
-	r.poll(ctx, workerID)
+	r.pollCoordinator(ctx)
+	var wg sync.WaitGroup
+	concurrency := r.cfg.Worker.Concurrency
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	for index := 0; index < concurrency; index++ {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			r.workerLoop(ctx, workerID, slot)
+		}(index)
+	}
+	defer wg.Wait()
 	for {
 		select {
 		case <-ctx.Done():
@@ -51,12 +65,12 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			return nil
 		case <-ticker.C:
-			r.poll(ctx, workerID)
+			r.pollCoordinator(ctx)
 		}
 	}
 }
 
-func (r *Runner) poll(ctx context.Context, workerID string) {
+func (r *Runner) pollCoordinator(ctx context.Context) {
 	if r.store != nil && r.store.DB != nil {
 		_ = r.store.DB.PingContext(ctx)
 	}
@@ -69,9 +83,21 @@ func (r *Runner) poll(ctx context.Context, workerID string) {
 	if err := r.tasks.EnqueueDueSchedules(ctx); err != nil && r.logger != nil {
 		r.logger.Error("failed to enqueue due task schedules", "error", err)
 	}
-	for i := 0; i < r.cfg.Worker.Concurrency; i++ {
-		if err := r.tasks.ClaimAndExecute(ctx, workerID); err != nil && r.logger != nil {
-			r.logger.Error("failed to execute claimed task", "error", err)
+}
+
+func (r *Runner) workerLoop(ctx context.Context, workerID string, slot int) {
+	ticker := time.NewTicker(r.cfg.Worker.PollInterval)
+	defer ticker.Stop()
+	for {
+		if r.tasks != nil {
+			if err := r.tasks.ClaimAndExecute(ctx, workerID); err != nil && r.logger != nil {
+				r.logger.Error("failed to execute claimed task", "error", err, "worker_slot", slot)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }
