@@ -518,6 +518,18 @@ dd {
   padding: 10px;
 }
 
+.tool-panel pre {
+  background: #050505;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  color: var(--text-muted);
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .tool-panel span {
   color: var(--accent-strong);
   display: block;
@@ -525,6 +537,7 @@ dd {
   margin-top: 4px;
 }
 
+.summary-panel,
 .memory-panel {
   border: 1px solid var(--border-muted);
   border-radius: 8px;
@@ -532,10 +545,17 @@ dd {
   padding: 12px;
 }
 
+.summary-panel summary,
 .memory-panel summary {
   color: var(--accent-strong);
   cursor: pointer;
   font-weight: 700;
+}
+
+.summary-panel p {
+  color: var(--text-muted);
+  margin: 10px 0;
+  white-space: pre-wrap;
 }
 
 .memory-panel article {

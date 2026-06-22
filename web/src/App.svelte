@@ -47,6 +47,9 @@
     provider_id?: string;
     model?: string;
     summary?: string;
+    summary_status?: string;
+    summary_error?: string;
+    summary_updated_at?: string;
     archived_at?: string;
     updated_at: string;
   };
@@ -99,6 +102,21 @@
     name: string;
     state: string;
     result?: string;
+  };
+
+  type ToolCall = {
+    id: string;
+    chat_run_id: string;
+    provider_tool_call_id?: string;
+    provider_name?: string;
+    name: string;
+    input: string;
+    output?: string;
+    output_truncated?: boolean;
+    state: string;
+    approval_state: string;
+    error_message?: string;
+    created_at: string;
   };
 
   type MCPServer = {
@@ -285,6 +303,14 @@
     tools: MCPTool[];
   };
 
+  type ToolApprovalsResponse = {
+    tool_calls: ToolCall[];
+  };
+
+  type ToolCallResponse = {
+    tool_call: ToolCall;
+  };
+
   type TasksResponse = {
     tasks: TaskRecord[];
   };
@@ -365,6 +391,7 @@
   let replyDraft = '';
   let runMemories: MemorySnippet[] = [];
   let toolCards: ToolCard[] = [];
+  let pendingToolApprovals: ToolCall[] = [];
   let selectedConversationId = '';
   let selectedAgentId = '';
   let selectedProviderId = '';
@@ -376,6 +403,8 @@
   let submitting = false;
   let notice = '';
   let errorMessage = '';
+
+  $: selectedConversation = conversations.find((conversation) => conversation.id === selectedConversationId);
 
   let setupEmail = '';
   let setupDisplayName = '';
@@ -467,6 +496,7 @@
       refreshTasks(),
       refreshReplyPresets(),
       refreshFeedbackStats(),
+      refreshPendingToolApprovals(),
       refreshConversations()
     ]);
   }
@@ -668,6 +698,34 @@
     }
   }
 
+  async function regenerateSummary(): Promise<void> {
+    if (!selectedConversationId) return;
+    try {
+      const response = await postJSON<{ conversation: Conversation; queued: boolean }>(
+        `/api/v1/conversations/${selectedConversationId}/summary/regenerate`
+      );
+      conversations = conversations.map((conversation) =>
+        conversation.id === response.conversation.id ? response.conversation : conversation
+      );
+      notice = response.queued ? 'Conversation summary regeneration queued.' : 'Conversation summary is already queued.';
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    }
+  }
+
+  async function clearSummary(): Promise<void> {
+    if (!selectedConversationId || !confirm('Clear this conversation summary?')) return;
+    try {
+      const response = await deleteJSON<ConversationResponse>(`/api/v1/conversations/${selectedConversationId}/summary`);
+      conversations = conversations.map((conversation) =>
+        conversation.id === response.conversation.id ? response.conversation : conversation
+      );
+      notice = 'Conversation summary cleared.';
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    }
+  }
+
   async function sendMessage(): Promise<void> {
     if (!composer.trim()) {
       return;
@@ -698,6 +756,42 @@
     await postJSON<{ ok: boolean }>(`/api/v1/chat-runs/${activeRunId}/cancel`);
   }
 
+  async function refreshPendingToolApprovals(): Promise<void> {
+    const response = await getJSON<ToolApprovalsResponse>('/api/v1/tool-approvals/pending');
+    pendingToolApprovals = response.tool_calls;
+  }
+
+  async function approveToolCall(toolCall: ToolCall, decision: 'approve_once' | 'approve_conversation' | 'allow_agent'): Promise<void> {
+    try {
+      await postJSON<ToolCallResponse>(`/api/v1/tool-calls/${toolCall.id}/approve`, { decision });
+      pendingToolApprovals = pendingToolApprovals.filter((item) => item.id !== toolCall.id);
+      await resumeRun(toolCall.chat_run_id);
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    }
+  }
+
+  async function denyToolCall(toolCall: ToolCall, decision: 'deny' | 'deny_disable_tool'): Promise<void> {
+    try {
+      await postJSON<ToolCallResponse>(`/api/v1/tool-calls/${toolCall.id}/deny`, { decision });
+      pendingToolApprovals = pendingToolApprovals.filter((item) => item.id !== toolCall.id);
+      await resumeRun(toolCall.chat_run_id);
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    }
+  }
+
+  async function resumeRun(runId: string): Promise<void> {
+    activeRunId = runId;
+    await postStream(`/api/v1/chat-runs/${runId}/resume`, {}, handleChatEvent);
+    activeRunId = '';
+    await Promise.all([
+      refreshConversations(),
+      selectedConversationId ? selectConversation(selectedConversationId) : Promise.resolve(),
+      refreshPendingToolApprovals()
+    ]);
+  }
+
   function handleChatEvent(event: string, payload: unknown): void {
     if (event === 'run_started' && isRunStarted(payload)) {
       activeRunId = payload.run.id;
@@ -720,6 +814,9 @@
         name: toolCall.function.name,
         state: 'running'
       }));
+    }
+    if (event === 'tool_approval_required') {
+      void refreshPendingToolApprovals();
     }
     if (event === 'tool_result' && isToolResult(payload)) {
       toolCards = [
@@ -1367,6 +1464,32 @@
                 </select>
                 <input bind:value={selectedModel} aria-label="Model" placeholder="Model ID" />
               </div>
+              {#if selectedConversation}
+                <details class="summary-panel" open={Boolean(selectedConversation.summary)}>
+                  <summary>
+                    Conversation summary
+                    {#if selectedConversation.summary_status}
+                      <span>{selectedConversation.summary_status}</span>
+                    {/if}
+                  </summary>
+                  {#if selectedConversation.summary}
+                    <p>{selectedConversation.summary}</p>
+                    {#if selectedConversation.summary_updated_at}
+                      <small>Updated {new Date(selectedConversation.summary_updated_at).toLocaleString()}</small>
+                    {/if}
+                  {:else if selectedConversation.summary_error}
+                    <p>{selectedConversation.summary_error}</p>
+                  {:else}
+                    <p>No summary stored for this conversation.</p>
+                  {/if}
+                  <div class="message-actions">
+                    <button on:click={regenerateSummary} type="button">Regenerate summary</button>
+                    {#if selectedConversation.summary}
+                      <button on:click={clearSummary} type="button">Clear summary</button>
+                    {/if}
+                  </div>
+                </details>
+              {/if}
               <div class="message-list" aria-live="polite">
                 {#if messages.length === 0}
                   <p>{strings.chat.noMessages}</p>
@@ -1465,6 +1588,35 @@
                       {#if tool.result}
                         <p>{tool.result}</p>
                       {/if}
+                    </article>
+                  {/each}
+                </section>
+              {/if}
+              {#if pendingToolApprovals.length > 0}
+                <section class="tool-panel" aria-label="Pending tool approvals">
+                  <div class="panel-heading">
+                    <h2>Pending tool approvals</h2>
+                    <button on:click={refreshPendingToolApprovals} type="button">Refresh</button>
+                  </div>
+                  {#each pendingToolApprovals as toolCall (toolCall.id)}
+                    <article>
+                      <strong>{toolCall.name}</strong>
+                      <span>{toolCall.state}</span>
+                      <pre>{toolCall.input}</pre>
+                      {#if toolCall.error_message}
+                        <p>{toolCall.error_message}</p>
+                      {/if}
+                      <div class="message-actions">
+                        <button on:click={() => approveToolCall(toolCall, 'approve_once')} type="button">Approve once</button>
+                        <button on:click={() => approveToolCall(toolCall, 'approve_conversation')} type="button">
+                          Approve conversation
+                        </button>
+                        <button on:click={() => approveToolCall(toolCall, 'allow_agent')} type="button">Allow for agent</button>
+                        <button on:click={() => denyToolCall(toolCall, 'deny')} type="button">Deny</button>
+                        <button on:click={() => denyToolCall(toolCall, 'deny_disable_tool')} type="button">
+                          Deny and disable
+                        </button>
+                      </div>
                     </article>
                   {/each}
                 </section>
