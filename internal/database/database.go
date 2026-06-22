@@ -22,6 +22,13 @@ type Store struct {
 	Dialect Dialect
 }
 
+type MigrationStatus struct {
+	Current bool     `json:"current"`
+	Applied int      `json:"applied"`
+	Total   int      `json:"total"`
+	Pending []string `json:"pending,omitempty"`
+}
+
 type Dialect string
 
 const (
@@ -131,23 +138,15 @@ func RunMigrations(ctx context.Context, store *Store, root string) error {
 	if store == nil || store.DB == nil {
 		return errors.New("database store is nil")
 	}
-	dialectDir := string(store.Dialect)
-	dir := filepath.Join(root, dialectDir)
-	entries, err := os.ReadDir(dir)
+	files, err := migrationFiles(store, root)
 	if err != nil {
-		return fmt.Errorf("read migrations directory %s: %w", dir, err)
+		return err
 	}
+	dir := filepath.Join(root, string(store.Dialect))
 	if err := ensureMigrationsTable(ctx, store); err != nil {
 		return err
 	}
 
-	var files []string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-			files = append(files, entry.Name())
-		}
-	}
-	sort.Strings(files)
 	for _, name := range files {
 		applied, err := migrationApplied(ctx, store, name)
 		if err != nil {
@@ -166,6 +165,51 @@ func RunMigrations(ctx context.Context, store *Store, root string) error {
 		}
 	}
 	return nil
+}
+
+func CheckMigrations(ctx context.Context, store *Store, root string) (MigrationStatus, error) {
+	if store == nil || store.DB == nil {
+		return MigrationStatus{}, errors.New("database store is nil")
+	}
+	files, err := migrationFiles(store, root)
+	if err != nil {
+		return MigrationStatus{}, err
+	}
+	status := MigrationStatus{Total: len(files), Current: true}
+	for _, name := range files {
+		applied, err := migrationApplied(ctx, store, name)
+		if errors.Is(err, sql.ErrNoRows) {
+			applied = false
+			err = nil
+		}
+		if err != nil {
+			return MigrationStatus{}, err
+		}
+		if applied {
+			status.Applied++
+			continue
+		}
+		status.Current = false
+		status.Pending = append(status.Pending, name)
+	}
+	return status, nil
+}
+
+func migrationFiles(store *Store, root string) ([]string, error) {
+	dialectDir := string(store.Dialect)
+	dir := filepath.Join(root, dialectDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read migrations directory %s: %w", dir, err)
+	}
+	var files []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			files = append(files, entry.Name())
+		}
+	}
+	sort.Strings(files)
+	return files, nil
 }
 
 func ensureMigrationsTable(ctx context.Context, store *Store) error {

@@ -216,7 +216,15 @@ func runDoctor(ctx context.Context, cfg config.Config, store *database.Store) er
 		status["ok"] = false
 		status["database_error"] = err.Error()
 	} else {
-		status["ready"] = true
+		migrations, err := database.CheckMigrations(ctx, store, cfg.MigrationsDir)
+		if err != nil {
+			status["ok"] = false
+			status["migration_error"] = err.Error()
+		} else {
+			status["migrated"] = migrations.Current
+			status["migrations"] = migrations
+			status["ready"] = migrations.Current
+		}
 	}
 	return logging.WriteJSON(os.Stdout, status)
 }

@@ -23,6 +23,7 @@ func TestSQLiteMigrationsIntegration(t *testing.T) {
 	if err := database.RunMigrations(ctx, store, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatalf("run sqlite migrations: %v", err)
 	}
+	assertMigrationsCurrent(ctx, t, store)
 	assertCoreTables(ctx, t, store)
 }
 
@@ -40,7 +41,19 @@ func TestPostgresMigrationsIntegration(t *testing.T) {
 	if err := database.RunMigrations(ctx, store, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatalf("run postgres migrations: %v", err)
 	}
+	assertMigrationsCurrent(ctx, t, store)
 	assertCoreTables(ctx, t, store)
+}
+
+func assertMigrationsCurrent(ctx context.Context, t *testing.T, store *database.Store) {
+	t.Helper()
+	status, err := database.CheckMigrations(ctx, store, filepath.Join("..", "..", "migrations"))
+	if err != nil {
+		t.Fatalf("check migrations: %v", err)
+	}
+	if !status.Current || status.Applied != status.Total || status.Total == 0 {
+		t.Fatalf("migrations are not current: %#v", status)
+	}
 }
 
 func assertCoreTables(ctx context.Context, t *testing.T, store *database.Store) {
