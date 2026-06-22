@@ -5,6 +5,7 @@
   import ConversationSummaryPanel from './components/chat/ConversationSummaryPanel.svelte';
   import PendingToolApprovals from './components/chat/PendingToolApprovals.svelte';
   import { deleteJSON, getJSON, postJSON, postStream, putJSON } from './lib/api';
+  import { formatHeaderText, parseHeaderText } from './lib/provider-form';
   import type {
     Agent,
     AgentResponse,
@@ -113,11 +114,18 @@
   let setupConfirmPassword = '';
   let loginEmail = '';
   let loginPassword = '';
+  let editingProviderId = '';
   let providerName = '';
   let providerBaseUrl = '';
   let providerApiKey = '';
   let providerApiKeyEnvRef = '';
+  let providerOrganization = '';
+  let providerProject = '';
+  let providerCustomHeaders = '';
   let providerDefaultModel = '';
+  let providerFallbackModel = '';
+  let providerTimeoutMS = 60000;
+  let providerEnabled = true;
   let agentName = '';
   let agentPrompt = '';
   let agentMemoryMode = 'pinned_only';
@@ -307,25 +315,83 @@
     errorMessage = '';
     notice = '';
     try {
+      const customHeaders = parseHeaderText(providerCustomHeaders);
       const payload = {
         name: providerName,
         base_url: providerBaseUrl,
         api_key: providerApiKey || undefined,
         api_key_env_ref: providerApiKeyEnvRef,
-        enabled: true,
-        request_timeout_ms: 60000,
-        default_model: providerDefaultModel
+        organization_header: providerOrganization,
+        project_header: providerProject,
+        custom_headers: customHeaders,
+        enabled: providerEnabled,
+        request_timeout_ms: providerTimeoutMS,
+        default_model: providerDefaultModel,
+        fallback_model: providerFallbackModel
       };
-      const response = await postJSON<ProviderResponse>('/api/v1/providers', payload);
-      providerName = '';
-      providerBaseUrl = '';
-      providerApiKey = '';
-      providerApiKeyEnvRef = '';
-      providerDefaultModel = '';
+      const providerBeingEdited = editingProviderId;
+      const response = providerBeingEdited
+        ? await putJSON<ProviderResponse>(`/api/v1/providers/${providerBeingEdited}`, payload)
+        : await postJSON<ProviderResponse>('/api/v1/providers', payload);
+      resetProviderForm();
       selectedProviderId = response.provider.id;
       selectedModel = response.provider.default_model ?? '';
       await refreshProviders();
-      notice = 'Provider saved.';
+      notice = providerBeingEdited ? 'Provider updated.' : 'Provider saved.';
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  function editProvider(provider: Provider): void {
+    editingProviderId = provider.id;
+    providerName = provider.name;
+    providerBaseUrl = provider.base_url;
+    providerApiKey = '';
+    providerApiKeyEnvRef = provider.api_key_env_ref ?? '';
+    providerOrganization = provider.organization_header ?? '';
+    providerProject = provider.project_header ?? '';
+    providerCustomHeaders = formatHeaderText(provider.custom_headers);
+    providerDefaultModel = provider.default_model ?? '';
+    providerFallbackModel = provider.fallback_model ?? '';
+    providerTimeoutMS = provider.request_timeout_ms;
+    providerEnabled = provider.enabled;
+  }
+
+  function resetProviderForm(): void {
+    editingProviderId = '';
+    providerName = '';
+    providerBaseUrl = '';
+    providerApiKey = '';
+    providerApiKeyEnvRef = '';
+    providerOrganization = '';
+    providerProject = '';
+    providerCustomHeaders = '';
+    providerDefaultModel = '';
+    providerFallbackModel = '';
+    providerTimeoutMS = 60000;
+    providerEnabled = true;
+  }
+
+  async function deleteProvider(providerId: string): Promise<void> {
+    if (!confirm('Delete this provider? Conversations that used it keep their stored messages.')) {
+      return;
+    }
+    submitting = true;
+    errorMessage = '';
+    try {
+      await deleteJSON<{ ok: boolean }>(`/api/v1/providers/${providerId}`);
+      if (selectedProviderId === providerId) {
+        selectedProviderId = '';
+        selectedModel = '';
+      }
+      if (editingProviderId === providerId) {
+        resetProviderForm();
+      }
+      await refreshProviders();
+      notice = 'Provider deleted.';
     } catch (error) {
       errorMessage = messageFromError(error);
     } finally {
@@ -1623,7 +1689,12 @@
         {:else if activeView === strings.nav.providers}
           <section class="providers-layout">
             <form class="panel" on:submit|preventDefault={createProvider}>
-              <h2>{strings.providers.add}</h2>
+              <div class="panel-heading">
+                <h2>{editingProviderId ? 'Edit provider' : strings.providers.add}</h2>
+                {#if editingProviderId}
+                  <button on:click={resetProviderForm} type="button">Cancel edit</button>
+                {/if}
+              </div>
               <p>{strings.providers.apiKeyHelp}</p>
               <label>
                 Name
@@ -1642,10 +1713,36 @@
                 <input bind:value={providerApiKeyEnvRef} placeholder="env:BIFROST_API_KEY" />
               </label>
               <label>
+                Organization header
+                <input bind:value={providerOrganization} />
+              </label>
+              <label>
+                Project header
+                <input bind:value={providerProject} />
+              </label>
+              <label>
+                Custom headers JSON
+                <textarea bind:value={providerCustomHeaders} placeholder="JSON object with string header values"></textarea>
+              </label>
+              <label>
                 Default model
                 <input bind:value={providerDefaultModel} placeholder="gpt-4.1-mini" />
               </label>
-              <button disabled={submitting} type="submit">{strings.providers.add}</button>
+              <label>
+                Fallback model
+                <input bind:value={providerFallbackModel} />
+              </label>
+              <label>
+                Request timeout, milliseconds
+                <input bind:value={providerTimeoutMS} min="1000" max="600000" type="number" />
+              </label>
+              <label class="inline-check">
+                <input bind:checked={providerEnabled} type="checkbox" />
+                Enabled
+              </label>
+              <button disabled={submitting} type="submit">
+                {editingProviderId ? 'Save provider' : strings.providers.add}
+              </button>
             </form>
             <section class="panel">
               <div class="panel-heading">
@@ -1662,12 +1759,26 @@
                         <strong>{provider.name}</strong>
                         <span>{provider.base_url}</span>
                         <span>{provider.health_status}{provider.last_error ? `: ${provider.last_error}` : ''}</span>
+                        {#if provider.default_model || provider.fallback_model}
+                          <span>
+                            {provider.default_model ? `default ${provider.default_model}` : ''}
+                            {provider.fallback_model ? ` / fallback ${provider.fallback_model}` : ''}
+                          </span>
+                        {/if}
+                        {#if provider.last_health_check_at}
+                          <span>
+                            Checked {new Date(provider.last_health_check_at).toLocaleString()}
+                            {provider.health_latency_ms ? ` / ${provider.health_latency_ms} ms` : ''}
+                          </span>
+                        {/if}
                       </div>
                       <div>
+                        <button on:click={() => editProvider(provider)} type="button">Edit</button>
                         <button on:click={() => testProvider(provider.id)} type="button">{strings.providers.test}</button>
                         <button on:click={() => refreshProviderModels(provider.id)} type="button">
                           {strings.providers.refreshModels}
                         </button>
+                        <button on:click={() => deleteProvider(provider.id)} type="button">Delete</button>
                       </div>
                     </article>
                   {/each}

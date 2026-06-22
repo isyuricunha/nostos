@@ -20,9 +20,14 @@ export type Provider = {
   base_url: string;
   enabled: boolean;
   request_timeout_ms: number;
+  organization_header?: string;
+  project_header?: string;
+  custom_headers: Record<string, string>;
   default_model?: string;
   fallback_model?: string;
   health_status: string;
+  last_health_check_at?: string;
+  health_latency_ms?: number;
   last_error?: string;
   api_key_env_ref?: string;
 };
