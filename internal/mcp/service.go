@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -11,11 +12,14 @@ import (
 	"github.com/yuricunha/nostos/internal/auth"
 	"github.com/yuricunha/nostos/internal/config"
 	"github.com/yuricunha/nostos/internal/crypto"
+	"github.com/yuricunha/nostos/internal/providers"
 )
 
 var (
-	ErrInvalidInput = errors.New("invalid MCP input")
-	ErrSecretKey    = errors.New("APP_ENCRYPTION_KEY is required for MCP secrets")
+	ErrInvalidInput     = errors.New("invalid MCP input")
+	ErrSecretKey        = errors.New("APP_ENCRYPTION_KEY is required for MCP secrets")
+	ErrApprovalRequired = errors.New("MCP tool approval is required")
+	ErrToolDenied       = errors.New("MCP tool is denied")
 )
 
 type Service struct {
@@ -96,6 +100,74 @@ func (s *Service) UpdateToolPermission(ctx context.Context, principal PrincipalC
 		return fmt.Errorf("%w: permission mode is invalid", ErrInvalidInput)
 	}
 	return s.repo.UpdateToolPermission(ctx, principal.WorkspaceID, toolID, mode)
+}
+
+func (s *Service) AllowedChatTools(ctx context.Context, workspaceID string) ([]providers.ChatTool, error) {
+	tools, err := s.repo.ListTools(ctx, workspaceID, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]providers.ChatTool, 0, len(tools))
+	for _, tool := range tools {
+		if tool.PermissionMode != "allow" {
+			continue
+		}
+		parameters := json.RawMessage(`{}`)
+		if strings.TrimSpace(tool.InputSchema) != "" {
+			parameters = json.RawMessage(tool.InputSchema)
+		}
+		out = append(out, providers.ChatTool{
+			Type: "function",
+			Function: providers.ChatToolFunction{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  parameters,
+			},
+		})
+	}
+	return out, nil
+}
+
+func (s *Service) ExecuteAllowedTool(ctx context.Context, workspaceID string, name string, arguments string) (string, error) {
+	tools, err := s.repo.ListTools(ctx, workspaceID, "")
+	if err != nil {
+		return "", err
+	}
+	var selected Tool
+	for _, tool := range tools {
+		if tool.Name == name {
+			selected = tool
+			break
+		}
+	}
+	if selected.ID == "" {
+		return "", ErrNotFound
+	}
+	switch selected.PermissionMode {
+	case "deny":
+		return "", ErrToolDenied
+	case "ask":
+		return "", ErrApprovalRequired
+	case "allow":
+	default:
+		return "", ErrApprovalRequired
+	}
+	server, secret, err := s.repo.GetServer(ctx, workspaceID, selected.ServerID)
+	if err != nil {
+		return "", err
+	}
+	if !server.Enabled {
+		return "", ErrToolDenied
+	}
+	secret, err = s.decryptSecret(secret)
+	if err != nil {
+		return "", err
+	}
+	result, err := s.client.CallTool(ctx, server, secret, selected.Name, arguments)
+	if err != nil {
+		return "", err
+	}
+	return result.Text, nil
 }
 
 func (s *Service) normalizeInput(workspaceID string, input ServerInput) (Server, ServerSecret, error) {

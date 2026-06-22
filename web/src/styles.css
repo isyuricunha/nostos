@@ -506,6 +506,25 @@ dd {
   padding: 12px;
 }
 
+.tool-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-panel article {
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  background: #090909;
+  padding: 10px;
+}
+
+.tool-panel span {
+  color: var(--accent-strong);
+  display: block;
+  font-size: 0.82rem;
+  margin-top: 4px;
+}
+
 .memory-panel {
   border: 1px solid var(--border-muted);
   border-radius: 8px;

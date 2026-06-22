@@ -26,6 +26,11 @@ type MemoryProvider interface {
 	RecordRunMemories(ctx context.Context, runID string, memories []MemorySnippet) error
 }
 
+type ToolProvider interface {
+	AllowedChatTools(ctx context.Context, workspaceID string) ([]providers.ChatTool, error)
+	ExecuteAllowedTool(ctx context.Context, workspaceID string, name string, arguments string) (string, error)
+}
+
 type Service struct {
 	cfg       config.Config
 	repo      Repository
@@ -33,6 +38,7 @@ type Service struct {
 	client    *providers.OpenAIClient
 	agents    AgentResolver
 	memories  MemoryProvider
+	tools     ToolProvider
 }
 
 type StreamSink func(event string, payload any) error
@@ -46,6 +52,11 @@ func NewService(
 	memoryProvider MemoryProvider,
 ) *Service {
 	return &Service{cfg: cfg, repo: repo, providers: providerResolver, client: client, agents: agentResolver, memories: memoryProvider}
+}
+
+func (s *Service) WithToolProvider(toolProvider ToolProvider) *Service {
+	s.tools = toolProvider
+	return s
 }
 
 func (s *Service) ListConversations(ctx context.Context, principal PrincipalContext, search string) ([]Conversation, error) {
@@ -196,6 +207,7 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 		APIKey:   apiKey,
 		Model:    model,
 		Messages: s.promptMessages(conversation, agent, memories, content),
+		Tools:    s.allowedTools(ctx, principal.WorkspaceID),
 	})
 	if err != nil {
 		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_unavailable", err.Error(), true)
@@ -205,6 +217,8 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 
 	var contentBuilder strings.Builder
 	var usage UsageValues
+	var toolCalls []providers.ToolCall
+	toolReady := false
 	for event := range events {
 		cancelled, err := s.repo.CancellationRequested(ctx, run.ID)
 		if err != nil {
@@ -232,8 +246,17 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 			if err := sink("reasoning_delta", map[string]string{"delta": event.Reasoning}); err != nil {
 				return err
 			}
-		case "tool_call_delta", "tool_call_ready":
+		case "tool_call_delta":
+			if event.ToolCall != nil {
+				toolCalls = mergeToolCall(toolCalls, *event.ToolCall)
+			}
 			if err := sink(event.Type, event.ToolCall); err != nil {
+				return err
+			}
+		case "tool_call_ready":
+			toolReady = true
+			_ = s.repo.UpdateRunState(ctx, run.ID, RunWaitingForApproval, "", "", false)
+			if err := sink(event.Type, map[string]any{"run_id": run.ID, "tool_calls": toolCalls}); err != nil {
 				return err
 			}
 		case "usage":
@@ -246,10 +269,16 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 				}
 			}
 		case "run_completed":
+			if toolReady {
+				break
+			}
 			_ = s.repo.UpdateMessageContent(ctx, assistantMessage.ID, contentBuilder.String(), usage)
 			_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
 			return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
 		}
+	}
+	if toolReady {
+		return s.executeToolFollowup(ctx, principal, run.ID, assistantMessage.ID, provider, apiKey, model, conversation, agent, memories, content, toolCalls, sink)
 	}
 	_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
 	return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
@@ -416,6 +445,120 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 func (s *Service) CleanupInterruptedRuns(ctx context.Context) error {
 	_, err := s.repo.CleanupInterruptedRuns(ctx, time.Now().UTC())
 	return err
+}
+
+func (s *Service) allowedTools(ctx context.Context, workspaceID string) []providers.ChatTool {
+	if s.tools == nil {
+		return nil
+	}
+	tools, err := s.tools.AllowedChatTools(ctx, workspaceID)
+	if err != nil {
+		return nil
+	}
+	return tools
+}
+
+func mergeToolCall(calls []providers.ToolCall, next providers.ToolCall) []providers.ToolCall {
+	if next.ID == "" {
+		next.ID = next.Function.Name
+	}
+	if next.Type == "" {
+		next.Type = "function"
+	}
+	for index := range calls {
+		if calls[index].ID == next.ID {
+			if next.Function.Name != "" {
+				calls[index].Function.Name = next.Function.Name
+			}
+			calls[index].Function.Arguments += next.Function.Arguments
+			return calls
+		}
+	}
+	return append(calls, next)
+}
+
+func (s *Service) executeToolFollowup(
+	ctx context.Context,
+	principal PrincipalContext,
+	runID string,
+	assistantMessageID string,
+	provider providers.Provider,
+	apiKey string,
+	model string,
+	conversation Conversation,
+	agent AgentContext,
+	memories []MemorySnippet,
+	content string,
+	toolCalls []providers.ToolCall,
+	sink StreamSink,
+) error {
+	if s.tools == nil || len(toolCalls) == 0 {
+		message := "The model requested a tool, but no executable tool was available."
+		_ = s.repo.UpdateRunState(ctx, runID, RunFailed, "tool_unavailable", message, true)
+		_ = sink("tool_approval_required", map[string]any{"run_id": runID, "message": message})
+		return errors.New(message)
+	}
+	messages := s.promptMessages(conversation, agent, memories, content)
+	messages = append(messages, providers.ChatMessage{Role: "assistant", ToolCalls: toolCalls})
+	for _, call := range toolCalls {
+		result, err := s.tools.ExecuteAllowedTool(ctx, principal.WorkspaceID, call.Function.Name, call.Function.Arguments)
+		if err != nil {
+			_ = s.repo.UpdateRunState(ctx, runID, RunFailed, "tool_execution_failed", err.Error(), true)
+			_ = sink("run_failed", map[string]any{"run_id": runID, "message": err.Error()})
+			return err
+		}
+		if err := sink("tool_result", map[string]any{"tool_call_id": call.ID, "name": call.Function.Name, "result": result}); err != nil {
+			return err
+		}
+		messages = append(messages, providers.ChatMessage{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Content:    result,
+		})
+	}
+	_ = s.repo.UpdateRunState(ctx, runID, RunStreaming, "", "", false)
+	events, err := s.client.StreamChat(ctx, providers.StreamRequest{
+		Provider: provider,
+		APIKey:   apiKey,
+		Model:    model,
+		Messages: messages,
+	})
+	if err != nil {
+		_ = s.repo.UpdateRunState(ctx, runID, RunFailed, "provider_unavailable", err.Error(), true)
+		return err
+	}
+	var contentBuilder strings.Builder
+	var usage UsageValues
+	for event := range events {
+		if event.Error != nil {
+			_ = s.repo.UpdateRunState(ctx, runID, RunFailed, "provider_stream_failed", event.Error.Error(), true)
+			_ = sink("run_failed", map[string]any{"run_id": runID, "message": event.Error.Error()})
+			return event.Error
+		}
+		switch event.Type {
+		case "content_delta":
+			contentBuilder.WriteString(event.Content)
+			_ = s.repo.UpdateMessageContent(ctx, assistantMessageID, contentBuilder.String(), usage)
+			if err := sink("content_delta", map[string]string{"delta": event.Content}); err != nil {
+				return err
+			}
+		case "usage":
+			if event.Usage != nil {
+				usage = UsageValues{PromptTokens: event.Usage.PromptTokens, CompletionTokens: event.Usage.CompletionTokens, TotalTokens: event.Usage.TotalTokens}
+				_ = s.repo.UpdateRunUsage(ctx, runID, usage)
+				_ = s.repo.UpdateMessageContent(ctx, assistantMessageID, contentBuilder.String(), usage)
+				if err := sink("usage", usage); err != nil {
+					return err
+				}
+			}
+		case "run_completed":
+			_ = s.repo.UpdateMessageContent(ctx, assistantMessageID, contentBuilder.String(), usage)
+			_ = s.repo.UpdateRunState(ctx, runID, RunCompleted, "", "", true)
+			return sink("run_completed", map[string]any{"run_id": runID, "assistant_message_id": assistantMessageID})
+		}
+	}
+	_ = s.repo.UpdateRunState(ctx, runID, RunCompleted, "", "", true)
+	return sink("run_completed", map[string]any{"run_id": runID, "assistant_message_id": assistantMessageID})
 }
 
 func (s *Service) resolveAgent(ctx context.Context, conversation Conversation) (AgentContext, error) {

@@ -111,6 +111,11 @@ type MemorySnippet struct {
 	Score   float64 `json:"score"`
 }
 
+type ToolResult struct {
+	Text      string
+	Truncated bool
+}
+
 type RunInput struct {
 	Content                 string `json:"content"`
 	ProviderID              string `json:"provider_id,omitempty"`

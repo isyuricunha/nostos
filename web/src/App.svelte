@@ -94,6 +94,13 @@
     score: number;
   };
 
+  type ToolCard = {
+    id: string;
+    name: string;
+    state: string;
+    result?: string;
+  };
+
   type MCPServer = {
     id: string;
     name: string;
@@ -357,6 +364,7 @@
   let replyCustomInstruction = '';
   let replyDraft = '';
   let runMemories: MemorySnippet[] = [];
+  let toolCards: ToolCard[] = [];
   let selectedConversationId = '';
   let selectedAgentId = '';
   let selectedProviderId = '';
@@ -694,6 +702,7 @@
     if (event === 'run_started' && isRunStarted(payload)) {
       activeRunId = payload.run.id;
       runMemories = [];
+      toolCards = [];
       messages = [...messages, payload.user_message, payload.assistant_message];
     }
     if (event === 'memories_used' && isMemoriesUsed(payload)) {
@@ -704,6 +713,19 @@
       if (last?.role === 'assistant') {
         messages = [...messages.slice(0, -1), { ...last, content: `${last.content}${payload.delta}` }];
       }
+    }
+    if (event === 'tool_call_ready' && isToolCallReady(payload)) {
+      toolCards = payload.tool_calls.map((toolCall) => ({
+        id: toolCall.id,
+        name: toolCall.function.name,
+        state: 'running'
+      }));
+    }
+    if (event === 'tool_result' && isToolResult(payload)) {
+      toolCards = [
+        ...toolCards.filter((tool) => tool.id !== payload.tool_call_id),
+        { id: payload.tool_call_id, name: payload.name, state: 'completed', result: payload.result }
+      ];
     }
     if (event === 'run_completed' || event === 'run_failed' || event === 'run_cancelled') {
       activeRunId = '';
@@ -720,6 +742,14 @@
 
   function isMemoriesUsed(payload: unknown): payload is { memories: MemorySnippet[] } {
     return typeof payload === 'object' && payload !== null && 'memories' in payload;
+  }
+
+  function isToolCallReady(payload: unknown): payload is { tool_calls: { id: string; function: { name: string } }[] } {
+    return typeof payload === 'object' && payload !== null && 'tool_calls' in payload;
+  }
+
+  function isToolResult(payload: unknown): payload is { tool_call_id: string; name: string; result: string } {
+    return typeof payload === 'object' && payload !== null && 'tool_call_id' in payload && 'result' in payload;
   }
 
   async function refreshAgents(): Promise<void> {
@@ -1424,6 +1454,19 @@
                   {#if replyDraft}
                     <textarea bind:value={replyDraft} aria-label="Generated reply draft"></textarea>
                   {/if}
+                </section>
+              {/if}
+              {#if toolCards.length > 0}
+                <section class="tool-panel" aria-label="Tool calls">
+                  {#each toolCards as tool (tool.id)}
+                    <article>
+                      <strong>{tool.name}</strong>
+                      <span>{tool.state}</span>
+                      {#if tool.result}
+                        <p>{tool.result}</p>
+                      {/if}
+                    </article>
+                  {/each}
                 </section>
               {/if}
               {#if runMemories.length > 0}

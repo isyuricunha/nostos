@@ -41,6 +41,18 @@ type StreamRequest struct {
 	APIKey   string
 	Model    string
 	Messages []ChatMessage
+	Tools    []ChatTool
+}
+
+type ChatTool struct {
+	Type     string           `json:"type"`
+	Function ChatToolFunction `json:"function"`
+}
+
+type ChatToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 type StreamEvent struct {
@@ -114,6 +126,9 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, request StreamRequest) (<
 		"stream_options": map[string]bool{
 			"include_usage": true,
 		},
+	}
+	if len(request.Tools) > 0 {
+		body["tools"] = request.Tools
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {

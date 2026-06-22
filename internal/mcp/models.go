@@ -61,6 +61,11 @@ type DiscoveredTool struct {
 	InputSchema any
 }
 
+type ToolCallResult struct {
+	Text      string
+	Truncated bool
+}
+
 type PrincipalContext struct {
 	WorkspaceID string
 	UserID      string
