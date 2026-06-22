@@ -476,6 +476,22 @@ func (s *Service) CleanupInterruptedRuns(ctx context.Context) error {
 	return err
 }
 
+func (s *Service) CleanupAbandonedChatRuns(ctx context.Context) (string, error) {
+	count, err := s.repo.CleanupInterruptedRuns(ctx, time.Now().UTC())
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("abandoned chat runs cleaned=%d", count), nil
+}
+
+func (s *Service) RecalculateConversationTitles(ctx context.Context, limit int) (string, error) {
+	count, err := s.repo.RecalculateConversationTitles(ctx, limit)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("conversation titles recalculated=%d", count), nil
+}
+
 func (s *Service) allowedTools(ctx context.Context, workspaceID string) []providers.ChatTool {
 	if s.tools == nil {
 		return nil

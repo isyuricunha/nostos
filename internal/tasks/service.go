@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,12 +19,14 @@ import (
 var ErrInvalidInput = errors.New("invalid task input")
 
 type Service struct {
-	cfg       config.Config
-	repo      Repository
-	audit     auth.Repository
-	providers ProviderResolver
-	client    *providers.OpenAIClient
-	summaries ConversationSummaryHandler
+	cfg             config.Config
+	repo            Repository
+	audit           auth.Repository
+	providers       ProviderResolver
+	client          *providers.OpenAIClient
+	summaries       ConversationSummaryHandler
+	chatMaintenance ChatMaintenanceHandler
+	mcpHealth       MCPHealthHandler
 }
 
 type ProviderResolver interface {
@@ -31,6 +35,19 @@ type ProviderResolver interface {
 
 type ConversationSummaryHandler interface {
 	UpdateConversationSummaries(ctx context.Context, limit int) (string, error)
+}
+
+type ChatMaintenanceHandler interface {
+	CleanupAbandonedChatRuns(ctx context.Context) (string, error)
+	RecalculateConversationTitles(ctx context.Context, limit int) (string, error)
+}
+
+type MCPHealthHandler interface {
+	CheckMCPServerHealth(ctx context.Context, limit int) (string, error)
+}
+
+type ProviderHealthHandler interface {
+	CheckProviderHealth(ctx context.Context, limit int) (string, error)
 }
 
 func NewService(cfg config.Config, repo Repository, audit auth.Repository) *Service {
@@ -45,6 +62,16 @@ func (s *Service) WithProviderClient(resolver ProviderResolver, client *provider
 
 func (s *Service) WithConversationSummaryHandler(handler ConversationSummaryHandler) *Service {
 	s.summaries = handler
+	return s
+}
+
+func (s *Service) WithChatMaintenanceHandler(handler ChatMaintenanceHandler) *Service {
+	s.chatMaintenance = handler
+	return s
+}
+
+func (s *Service) WithMCPHealthHandler(handler MCPHealthHandler) *Service {
+	s.mcpHealth = handler
 	return s
 }
 
@@ -489,14 +516,116 @@ func (s *Service) execute(ctx context.Context, task Task) (string, error) {
 
 func (s *Service) executeSystemTask(ctx context.Context, task Task) (string, error) {
 	switch task.Name {
+	case "cleanup_expired_sessions":
+		count, err := s.repo.CleanupExpiredSessions(ctx, time.Now().UTC())
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("expired sessions revoked=%d", count), nil
+	case "recover_expired_task_leases":
+		count, err := s.repo.RecoverExpiredLeases(ctx, time.Now().UTC())
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("expired task leases recovered=%d", count), nil
+	case "prune_old_task_run_events":
+		cutoff := time.Now().UTC().Add(-s.cfg.Tasks.RunRetention)
+		count, err := s.repo.PruneOldTaskRunEvents(ctx, cutoff)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("old task run events pruned=%d cutoff=%s", count, cutoff.Format(time.RFC3339)), nil
 	case "update_conversation_summaries":
 		if s.summaries == nil {
 			return "", errors.New("conversation summary handler is not configured")
 		}
 		return s.summaries.UpdateConversationSummaries(ctx, 10)
+	case "check_provider_health":
+		handler, ok := s.providers.(ProviderHealthHandler)
+		if !ok {
+			return "", errors.New("provider health handler is not configured")
+		}
+		return handler.CheckProviderHealth(ctx, 25)
+	case "check_mcp_server_health":
+		if s.mcpHealth == nil {
+			return "", errors.New("MCP health handler is not configured")
+		}
+		return s.mcpHealth.CheckMCPServerHealth(ctx, 25)
+	case "cleanup_abandoned_chat_runs":
+		if s.chatMaintenance == nil {
+			return "", errors.New("chat maintenance handler is not configured")
+		}
+		return s.chatMaintenance.CleanupAbandonedChatRuns(ctx)
+	case "recalculate_conversation_titles":
+		if s.chatMaintenance == nil {
+			return "", errors.New("chat maintenance handler is not configured")
+		}
+		return s.chatMaintenance.RecalculateConversationTitles(ctx, 25)
+	case "compact_duplicate_task_scheduling_events":
+		count, err := s.repo.CompactDuplicateSchedulingEvents(ctx)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("duplicate task scheduling events compacted=%d", count), nil
+	case "cleanup_temporary_files":
+		files, bytes, err := s.cleanupTemporaryFiles(ctx, time.Now().UTC().Add(-s.cfg.Tasks.RunRetention))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("temporary files deleted=%d bytes=%d", files, bytes), nil
 	default:
-		return "System task completed with no eligible records: " + task.Name, nil
+		return "", fmt.Errorf("%w: unknown system task %s", ErrInvalidInput, task.Name)
 	}
+}
+
+func (s *Service) cleanupTemporaryFiles(ctx context.Context, cutoff time.Time) (int, int64, error) {
+	root := filepath.Clean(filepath.Join(s.cfg.DataDir, "tmp"))
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return 0, 0, fmt.Errorf("%w: temporary directory is unsafe", ErrInvalidInput)
+	}
+	deletedFiles := 0
+	var deletedBytes int64
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		cleanPath := filepath.Clean(path)
+		relative, err := filepath.Rel(root, cleanPath)
+		if err != nil || strings.HasPrefix(relative, "..") || filepath.IsAbs(relative) {
+			return fmt.Errorf("%w: temporary path escapes data directory", ErrInvalidInput)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.IsDir() || info.ModTime().After(cutoff) {
+			return nil
+		}
+		size := info.Size()
+		if err := os.Remove(cleanPath); err != nil {
+			return err
+		}
+		deletedFiles++
+		deletedBytes += size
+		return nil
+	})
+	return deletedFiles, deletedBytes, err
 }
 
 func nextRun(schedule Schedule, now time.Time, defaultTimezone string) *time.Time {

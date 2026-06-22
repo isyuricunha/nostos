@@ -16,6 +16,7 @@ var ErrNotFound = errors.New("mcp record not found")
 
 type Repository interface {
 	ListServers(ctx context.Context, workspaceID string) ([]Server, error)
+	ListEnabledServers(ctx context.Context, limit int) ([]Server, []ServerSecret, error)
 	GetServer(ctx context.Context, workspaceID string, serverID string) (Server, ServerSecret, error)
 	CreateServer(ctx context.Context, server Server, secret ServerSecret) (Server, error)
 	UpdateServer(ctx context.Context, server Server, secret ServerSecret) (Server, error)
@@ -52,6 +53,31 @@ FROM mcp_servers WHERE workspace_id = ` + r.store.Placeholder(1) + ` ORDER BY na
 		servers = append(servers, server)
 	}
 	return servers, rows.Err()
+}
+
+func (r *SQLRepository) ListEnabledServers(ctx context.Context, limit int) ([]Server, []ServerSecret, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	query := `SELECT id, workspace_id, name, description, transport_type, command, arguments, working_directory, encrypted_environment,
+http_url, encrypted_http_headers, enabled, startup_timeout_ms, request_timeout_ms, health_status, last_error, last_connected_at, created_at, updated_at
+FROM mcp_servers WHERE enabled = ` + r.store.Placeholder(1) + ` ORDER BY updated_at ASC LIMIT ` + r.store.Placeholder(2)
+	rows, err := r.store.DB.QueryContext(ctx, query, true, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var servers []Server
+	var secrets []ServerSecret
+	for rows.Next() {
+		server, secret, err := scanServer(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+		servers = append(servers, server)
+		secrets = append(secrets, secret)
+	}
+	return servers, secrets, rows.Err()
 }
 
 func (r *SQLRepository) GetServer(ctx context.Context, workspaceID string, serverID string) (Server, ServerSecret, error) {

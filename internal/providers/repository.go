@@ -23,6 +23,8 @@ type Repository interface {
 	ReplaceModels(ctx context.Context, providerID string, modelIDs []string, source string) ([]Model, error)
 	ListModels(ctx context.Context, providerID string) ([]Model, error)
 	UpdateHealth(ctx context.Context, workspaceID string, providerID string, status string, lastError string, checkedAt time.Time) error
+	UpdateHealthWithLatency(ctx context.Context, workspaceID string, providerID string, status string, lastError string, checkedAt time.Time, latencyMS int) error
+	ListEnabledWithSecrets(ctx context.Context, limit int) ([]Provider, []ProviderSecret, error)
 }
 
 type SQLRepository struct {
@@ -35,7 +37,7 @@ func NewSQLRepository(store *database.Store) *SQLRepository {
 
 func (r *SQLRepository) List(ctx context.Context, workspaceID string) ([]Provider, error) {
 	query := `SELECT id, workspace_id, name, base_url, api_key_env_ref, organization_header, project_header, custom_headers,
-enabled, request_timeout_ms, default_model, fallback_model, health_status, last_health_check_at, last_error, created_at, updated_at
+enabled, request_timeout_ms, default_model, fallback_model, health_status, last_health_check_at, health_latency_ms, last_error, created_at, updated_at
 FROM providers WHERE workspace_id = ` + r.store.Placeholder(1) + ` ORDER BY name`
 	rows, err := r.store.DB.QueryContext(ctx, query, workspaceID)
 	if err != nil {
@@ -55,7 +57,7 @@ FROM providers WHERE workspace_id = ` + r.store.Placeholder(1) + ` ORDER BY name
 
 func (r *SQLRepository) Get(ctx context.Context, workspaceID string, providerID string) (Provider, ProviderSecret, error) {
 	query := `SELECT id, workspace_id, name, base_url, encrypted_api_key, api_key_env_ref, organization_header, project_header, custom_headers,
-enabled, request_timeout_ms, default_model, fallback_model, health_status, last_health_check_at, last_error, created_at, updated_at
+enabled, request_timeout_ms, default_model, fallback_model, health_status, last_health_check_at, health_latency_ms, last_error, created_at, updated_at
 FROM providers WHERE workspace_id = ` + r.store.Placeholder(1) + ` AND id = ` + r.store.Placeholder(2)
 	row := r.store.DB.QueryRowContext(ctx, query, workspaceID, providerID)
 	provider, secret, err := scanProviderWithSecret(row)
@@ -216,11 +218,40 @@ FROM provider_models WHERE provider_id = ` + r.store.Placeholder(1) + ` ORDER BY
 }
 
 func (r *SQLRepository) UpdateHealth(ctx context.Context, workspaceID string, providerID string, status string, lastError string, checkedAt time.Time) error {
+	return r.UpdateHealthWithLatency(ctx, workspaceID, providerID, status, lastError, checkedAt, 0)
+}
+
+func (r *SQLRepository) UpdateHealthWithLatency(ctx context.Context, workspaceID string, providerID string, status string, lastError string, checkedAt time.Time, latencyMS int) error {
 	query := `UPDATE providers SET health_status = ` + r.store.Placeholder(1) + `, last_error = ` + r.store.Placeholder(2) +
-		`, last_health_check_at = ` + r.store.Placeholder(3) + `, updated_at = ` + r.store.Placeholder(4) +
-		` WHERE workspace_id = ` + r.store.Placeholder(5) + ` AND id = ` + r.store.Placeholder(6)
-	_, err := r.store.DB.ExecContext(ctx, query, status, nullableString(lastError), r.store.NowArg(checkedAt), r.store.NowArg(checkedAt), workspaceID, providerID)
+		`, last_health_check_at = ` + r.store.Placeholder(3) + `, health_latency_ms = ` + r.store.Placeholder(4) +
+		`, updated_at = ` + r.store.Placeholder(5) + ` WHERE workspace_id = ` + r.store.Placeholder(6) + ` AND id = ` + r.store.Placeholder(7)
+	_, err := r.store.DB.ExecContext(ctx, query, status, nullableString(lastError), r.store.NowArg(checkedAt), nullInt(latencyMS), r.store.NowArg(checkedAt), workspaceID, providerID)
 	return err
+}
+
+func (r *SQLRepository) ListEnabledWithSecrets(ctx context.Context, limit int) ([]Provider, []ProviderSecret, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	query := `SELECT id, workspace_id, name, base_url, encrypted_api_key, api_key_env_ref, organization_header, project_header, custom_headers,
+enabled, request_timeout_ms, default_model, fallback_model, health_status, last_health_check_at, health_latency_ms, last_error, created_at, updated_at
+FROM providers WHERE enabled = ` + r.store.Placeholder(1) + ` ORDER BY updated_at ASC LIMIT ` + r.store.Placeholder(2)
+	rows, err := r.store.DB.QueryContext(ctx, query, true, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var providers []Provider
+	var secrets []ProviderSecret
+	for rows.Next() {
+		provider, secret, err := scanProviderWithSecret(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+		providers = append(providers, provider)
+		secrets = append(secrets, secret)
+	}
+	return providers, secrets, rows.Err()
 }
 
 func scanProvider(row rowScanner) (Provider, error) {
@@ -242,6 +273,7 @@ func scanProviderFields(row rowScanner, withSecret bool) (Provider, ProviderSecr
 	var defaultModel sql.NullString
 	var fallbackModel sql.NullString
 	var lastHealthRaw any
+	var latency sql.NullInt64
 	var createdRaw any
 	var updatedRaw any
 	var lastError sql.NullString
@@ -249,11 +281,11 @@ func scanProviderFields(row rowScanner, withSecret bool) (Provider, ProviderSecr
 	if withSecret {
 		err = row.Scan(&provider.ID, &provider.WorkspaceID, &provider.Name, &provider.BaseURL, &encrypted, &envRef,
 			&organization, &project, &headers, &provider.Enabled, &provider.RequestTimeoutMS, &defaultModel,
-			&fallbackModel, &provider.HealthStatus, &lastHealthRaw, &lastError, &createdRaw, &updatedRaw)
+			&fallbackModel, &provider.HealthStatus, &lastHealthRaw, &latency, &lastError, &createdRaw, &updatedRaw)
 	} else {
 		err = row.Scan(&provider.ID, &provider.WorkspaceID, &provider.Name, &provider.BaseURL, &envRef,
 			&organization, &project, &headers, &provider.Enabled, &provider.RequestTimeoutMS, &defaultModel,
-			&fallbackModel, &provider.HealthStatus, &lastHealthRaw, &lastError, &createdRaw, &updatedRaw)
+			&fallbackModel, &provider.HealthStatus, &lastHealthRaw, &latency, &lastError, &createdRaw, &updatedRaw)
 	}
 	if err != nil {
 		return Provider{}, ProviderSecret{}, err
@@ -264,6 +296,7 @@ func scanProviderFields(row rowScanner, withSecret bool) (Provider, ProviderSecr
 	provider.DefaultModel = defaultModel.String
 	provider.FallbackModel = fallbackModel.String
 	provider.LastError = lastError.String
+	provider.HealthLatencyMS = int(latency.Int64)
 	provider.CustomHeaders = parseStringMap(headers)
 	lastHealthAt, err := nullableTime(lastHealthRaw)
 	if err != nil {
@@ -367,6 +400,13 @@ func placeholders(store *database.Store, count int) string {
 
 func nullableString(value string) any {
 	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+func nullInt(value int) any {
+	if value <= 0 {
 		return nil
 	}
 	return value

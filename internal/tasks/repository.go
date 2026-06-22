@@ -31,6 +31,9 @@ type Repository interface {
 	ListEvents(ctx context.Context, runID string) ([]Event, error)
 	AppendEvent(ctx context.Context, event Event) error
 	RecoverExpiredLeases(ctx context.Context, now time.Time) (int64, error)
+	CleanupExpiredSessions(ctx context.Context, now time.Time) (int64, error)
+	PruneOldTaskRunEvents(ctx context.Context, cutoff time.Time) (int64, error)
+	CompactDuplicateSchedulingEvents(ctx context.Context) (int64, error)
 	Workspaces(ctx context.Context) ([]string, error)
 	SystemTaskExists(ctx context.Context, workspaceID string, name string) (bool, error)
 	GetSystemTaskByName(ctx context.Context, workspaceID string, name string) (Task, error)
@@ -325,6 +328,62 @@ func (r *SQLRepository) RecoverExpiredLeases(ctx context.Context, now time.Time)
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+func (r *SQLRepository) CleanupExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	query := `UPDATE sessions SET revoked_at = ` + r.store.Placeholder(1) + `, updated_at = ` + r.store.Placeholder(2) +
+		` WHERE revoked_at IS NULL AND expires_at < ` + r.store.Placeholder(3)
+	result, err := r.store.DB.ExecContext(ctx, query, r.store.NowArg(now), r.store.NowArg(now), r.store.NowArg(now))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (r *SQLRepository) PruneOldTaskRunEvents(ctx context.Context, cutoff time.Time) (int64, error) {
+	query := `DELETE FROM task_run_events WHERE created_at < ` + r.store.Placeholder(1)
+	result, err := r.store.DB.ExecContext(ctx, query, r.store.NowArg(cutoff))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (r *SQLRepository) CompactDuplicateSchedulingEvents(ctx context.Context) (int64, error) {
+	rows, err := r.store.DB.QueryContext(ctx, eventSelect(r.store)+` ORDER BY task_run_id, level, message, created_at`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var duplicates []string
+	var previous Event
+	for rows.Next() {
+		event, err := scanEvent(rows)
+		if err != nil {
+			return 0, err
+		}
+		if event.RunID == previous.RunID && event.Level == previous.Level && event.Message == previous.Message && event.CreatedAt.Sub(previous.CreatedAt) <= time.Second {
+			duplicates = append(duplicates, event.ID)
+			continue
+		}
+		previous = event
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var deleted int64
+	for _, eventID := range duplicates {
+		result, err := r.store.DB.ExecContext(ctx, `DELETE FROM task_run_events WHERE id = `+r.store.Placeholder(1), eventID)
+		if err != nil {
+			return deleted, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return deleted, err
+		}
+		deleted += affected
+	}
+	return deleted, nil
 }
 
 func (r *SQLRepository) Workspaces(ctx context.Context) ([]string, error) {

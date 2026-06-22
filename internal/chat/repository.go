@@ -38,6 +38,7 @@ type Repository interface {
 	RequestCancellation(ctx context.Context, workspaceID string, ownerUserID string, runID string, now time.Time) error
 	CancellationRequested(ctx context.Context, runID string) (bool, error)
 	CleanupInterruptedRuns(ctx context.Context, now time.Time) (int64, error)
+	RecalculateConversationTitles(ctx context.Context, limit int) (int64, error)
 	FindRunByAssistantMessage(ctx context.Context, workspaceID string, ownerUserID string, messageID string) (ChatRun, error)
 }
 
@@ -388,6 +389,58 @@ func (r *SQLRepository) CleanupInterruptedRuns(ctx context.Context, now time.Tim
 	return result.RowsAffected()
 }
 
+func (r *SQLRepository) RecalculateConversationTitles(ctx context.Context, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	query := `SELECT id FROM conversations WHERE deleted_at IS NULL AND title = ` + r.store.Placeholder(1) +
+		` ORDER BY created_at ASC LIMIT ` + r.store.Placeholder(2)
+	rows, err := r.store.DB.QueryContext(ctx, query, "New conversation", limit)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var conversationIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		conversationIDs = append(conversationIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var updated int64
+	for _, conversationID := range conversationIDs {
+		var content string
+		titleQuery := `SELECT content FROM messages WHERE conversation_id = ` + r.store.Placeholder(1) +
+			` AND role = ` + r.store.Placeholder(2) + ` ORDER BY created_at ASC LIMIT 1`
+		if err := r.store.DB.QueryRowContext(ctx, titleQuery, conversationID, RoleUser).Scan(&content); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return updated, err
+		}
+		title := generatedTitle(content)
+		if title == "" {
+			continue
+		}
+		updateQuery := `UPDATE conversations SET title = ` + r.store.Placeholder(1) + `, updated_at = ` + r.store.Placeholder(2) +
+			` WHERE id = ` + r.store.Placeholder(3) + ` AND title = ` + r.store.Placeholder(4)
+		result, err := r.store.DB.ExecContext(ctx, updateQuery, title, r.store.NowArg(time.Now().UTC()), conversationID, "New conversation")
+		if err != nil {
+			return updated, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return updated, err
+		}
+		updated += affected
+	}
+	return updated, nil
+}
+
 func (r *SQLRepository) FindRunByAssistantMessage(ctx context.Context, workspaceID string, ownerUserID string, messageID string) (ChatRun, error) {
 	query := `SELECT cr.id, cr.conversation_id, cr.user_message_id, cr.assistant_message_id, cr.branch_id, cr.provider_id, cr.model, cr.state,
 cr.error_code, cr.error_message, cr.cancellation_requested_at, cr.started_at, cr.completed_at, cr.prompt_tokens, cr.completion_tokens,
@@ -677,4 +730,15 @@ func toolCallsFromMetadata(raw any) []providers.ToolCall {
 		return nil
 	}
 	return payload.ToolCalls
+}
+
+func generatedTitle(content string) string {
+	content = strings.Join(strings.Fields(content), " ")
+	if content == "" {
+		return ""
+	}
+	if len(content) > 60 {
+		content = strings.TrimSpace(content[:60])
+	}
+	return content
 }

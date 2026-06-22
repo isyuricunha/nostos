@@ -162,6 +162,42 @@ func (s *Service) ResolveDefaultForChat(ctx context.Context, workspaceID string)
 	return Provider{}, "", ErrNotFound
 }
 
+func (s *Service) CheckProviderHealth(ctx context.Context, limit int) (string, error) {
+	items, secrets, err := s.repo.ListEnabledWithSecrets(ctx, limit)
+	if err != nil {
+		return "", err
+	}
+	healthy := 0
+	unhealthy := 0
+	for index, provider := range items {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		apiKey, err := s.resolveAPIKey(secrets[index])
+		started := time.Now()
+		status := "healthy"
+		lastError := ""
+		if err == nil {
+			_, err = s.client.ListModels(ctx, provider, apiKey)
+		}
+		if err != nil {
+			status = "unhealthy"
+			lastError = sanitizeProviderError(err)
+			unhealthy++
+		} else {
+			healthy++
+		}
+		latencyMS := int(time.Since(started).Milliseconds())
+		if latencyMS < 1 {
+			latencyMS = 1
+		}
+		if updateErr := s.repo.UpdateHealthWithLatency(ctx, provider.WorkspaceID, provider.ID, status, lastError, time.Now().UTC(), latencyMS); updateErr != nil {
+			return "", updateErr
+		}
+	}
+	return fmt.Sprintf("provider health checked=%d healthy=%d unhealthy=%d", len(items), healthy, unhealthy), nil
+}
+
 func (s *Service) normalizeInput(workspaceID string, input ProviderInput, requireSecret bool) (Provider, ProviderSecret, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" || len(name) > 120 {
@@ -254,4 +290,15 @@ func sanitizeHeaders(headers map[string]string) map[string]string {
 		clean[key] = value
 	}
 	return clean
+}
+
+func sanitizeProviderError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(err.Error())
+	if len(message) > 500 {
+		message = message[:500]
+	}
+	return message
 }

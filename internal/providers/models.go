@@ -17,6 +17,7 @@ type Provider struct {
 	FallbackModel     string            `json:"fallback_model,omitempty"`
 	HealthStatus      string            `json:"health_status"`
 	LastHealthCheckAt *time.Time        `json:"last_health_check_at,omitempty"`
+	HealthLatencyMS   int               `json:"health_latency_ms,omitempty"`
 	LastError         string            `json:"last_error,omitempty"`
 	CreatedAt         time.Time         `json:"created_at"`
 	UpdatedAt         time.Time         `json:"updated_at"`

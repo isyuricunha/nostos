@@ -3,10 +3,13 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,6 +175,182 @@ func TestInvalidSchedulesAreRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected invalid cron expression to be rejected")
 	}
+}
+
+func TestSystemMaintenanceTasksPerformRealWork(t *testing.T) {
+	ctx := context.Background()
+	cfg, store, user, cleanup := newTaskTestContext(t)
+	defer cleanup()
+	cfg.DataDir = t.TempDir()
+	repo := NewSQLRepository(store)
+	service := NewService(cfg, repo, auth.NewSQLRepository(store))
+
+	authService := auth.NewService(auth.NewSQLRepository(store), cfg)
+	if _, err := authService.CreateSessionForUser(ctx, user, "127.0.0.1", "test"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	expired := time.Now().UTC().Add(-time.Hour)
+	if _, err := store.DB.ExecContext(ctx, "UPDATE sessions SET expires_at = "+store.Placeholder(1), store.NowArg(expired)); err != nil {
+		t.Fatalf("expire session: %v", err)
+	}
+	result, err := service.executeSystemTask(ctx, Task{Name: "cleanup_expired_sessions"})
+	if err != nil {
+		t.Fatalf("cleanup expired sessions: %v", err)
+	}
+	if !strings.Contains(result, "revoked=1") {
+		t.Fatalf("unexpected cleanup result %q", result)
+	}
+	var revokedCount int
+	if err := store.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions WHERE revoked_at IS NOT NULL").Scan(&revokedCount); err != nil {
+		t.Fatalf("count revoked sessions: %v", err)
+	}
+	if revokedCount != 1 {
+		t.Fatalf("expected one revoked session, got %d", revokedCount)
+	}
+
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	task, _, err := service.CreateTask(ctx, principal, TaskInput{
+		Name:              "Event task",
+		TaskType:          TaskTypeSystem,
+		State:             TaskEnabled,
+		Prompt:            "cleanup",
+		ScheduleMode:      "manual",
+		ToolPolicy:        "use_preapproved_tools_only",
+		ConcurrencyPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatalf("create event task: %v", err)
+	}
+	run, err := service.RunNow(ctx, principal, task.ID)
+	if err != nil {
+		t.Fatalf("run event task: %v", err)
+	}
+	if err := repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "info", Message: "scheduled occurrence enqueued"}); err != nil {
+		t.Fatalf("append first event: %v", err)
+	}
+	if err := repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "info", Message: "scheduled occurrence enqueued"}); err != nil {
+		t.Fatalf("append duplicate event: %v", err)
+	}
+	result, err = service.executeSystemTask(ctx, Task{Name: "compact_duplicate_task_scheduling_events"})
+	if err != nil {
+		t.Fatalf("compact duplicate events: %v", err)
+	}
+	if !strings.Contains(result, "compacted=1") {
+		t.Fatalf("unexpected compact result %q", result)
+	}
+	if err := repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "info", Message: "old event"}); err != nil {
+		t.Fatalf("append old event: %v", err)
+	}
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	if _, err := store.DB.ExecContext(ctx, "UPDATE task_run_events SET created_at = "+store.Placeholder(1)+" WHERE message = "+store.Placeholder(2), store.NowArg(old), "old event"); err != nil {
+		t.Fatalf("age old event: %v", err)
+	}
+	result, err = service.executeSystemTask(ctx, Task{Name: "prune_old_task_run_events"})
+	if err != nil {
+		t.Fatalf("prune old events: %v", err)
+	}
+	if !strings.Contains(result, "pruned=1") {
+		t.Fatalf("unexpected prune result %q", result)
+	}
+
+	tmpDir := filepath.Join(cfg.DataDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		t.Fatalf("create tmp dir: %v", err)
+	}
+	tmpFile := filepath.Join(tmpDir, "old.tmp")
+	if err := os.WriteFile(tmpFile, []byte("temporary"), 0o600); err != nil {
+		t.Fatalf("write tmp file: %v", err)
+	}
+	if err := os.Chtimes(tmpFile, old, old); err != nil {
+		t.Fatalf("age tmp file: %v", err)
+	}
+	result, err = service.executeSystemTask(ctx, Task{Name: "cleanup_temporary_files"})
+	if err != nil {
+		t.Fatalf("cleanup temporary files: %v", err)
+	}
+	if !strings.Contains(result, "deleted=1") {
+		t.Fatalf("unexpected tmp cleanup result %q", result)
+	}
+	if _, err := os.Stat(tmpFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file was not removed, stat err=%v", err)
+	}
+}
+
+func TestSystemMaintenanceTaskDispatchesDomainHandlers(t *testing.T) {
+	ctx := context.Background()
+	cfg, store, _, cleanup := newTaskTestContext(t)
+	defer cleanup()
+	provider := &fakeProviderMaintenance{}
+	chatHandler := &fakeChatMaintenance{}
+	mcpHandler := &fakeMCPMaintenance{}
+	summaryHandler := &fakeSummaryMaintenance{}
+	service := NewService(cfg, NewSQLRepository(store), auth.NewSQLRepository(store)).
+		WithProviderClient(provider, nil).
+		WithConversationSummaryHandler(summaryHandler).
+		WithChatMaintenanceHandler(chatHandler).
+		WithMCPHealthHandler(mcpHandler)
+	for _, name := range []string{
+		"update_conversation_summaries",
+		"check_provider_health",
+		"check_mcp_server_health",
+		"cleanup_abandoned_chat_runs",
+		"recalculate_conversation_titles",
+		"recover_expired_task_leases",
+	} {
+		if _, err := service.executeSystemTask(ctx, Task{Name: name}); err != nil {
+			t.Fatalf("execute %s: %v", name, err)
+		}
+	}
+	if summaryHandler.calls != 1 || provider.calls != 1 || mcpHandler.calls != 1 || chatHandler.cleanupCalls != 1 || chatHandler.titleCalls != 1 {
+		t.Fatalf("handlers were not dispatched correctly: summary=%d provider=%d mcp=%d chat_cleanup=%d chat_titles=%d",
+			summaryHandler.calls, provider.calls, mcpHandler.calls, chatHandler.cleanupCalls, chatHandler.titleCalls)
+	}
+}
+
+type fakeProviderMaintenance struct {
+	calls int
+}
+
+func (f *fakeProviderMaintenance) ResolveForChat(ctx context.Context, workspaceID string, providerID string) (providers.Provider, string, error) {
+	return providers.Provider{}, "", nil
+}
+
+func (f *fakeProviderMaintenance) CheckProviderHealth(ctx context.Context, limit int) (string, error) {
+	f.calls++
+	return "provider health checked=0 healthy=0 unhealthy=0", nil
+}
+
+type fakeChatMaintenance struct {
+	cleanupCalls int
+	titleCalls   int
+}
+
+func (f *fakeChatMaintenance) CleanupAbandonedChatRuns(ctx context.Context) (string, error) {
+	f.cleanupCalls++
+	return "abandoned chat runs cleaned=0", nil
+}
+
+func (f *fakeChatMaintenance) RecalculateConversationTitles(ctx context.Context, limit int) (string, error) {
+	f.titleCalls++
+	return "conversation titles recalculated=0", nil
+}
+
+type fakeMCPMaintenance struct {
+	calls int
+}
+
+func (f *fakeMCPMaintenance) CheckMCPServerHealth(ctx context.Context, limit int) (string, error) {
+	f.calls++
+	return "MCP server health checked=0 healthy=0 unhealthy=0", nil
+}
+
+type fakeSummaryMaintenance struct {
+	calls int
+}
+
+func (f *fakeSummaryMaintenance) UpdateConversationSummaries(ctx context.Context, limit int) (string, error) {
+	f.calls++
+	return "conversation summaries processed=0 failed=0", nil
 }
 
 func newTaskTestContext(t *testing.T) (config.Config, *database.Store, auth.User, func()) {

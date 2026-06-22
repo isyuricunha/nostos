@@ -95,6 +95,33 @@ func (s *Service) ListTools(ctx context.Context, principal PrincipalContext, ser
 	return s.repo.ListTools(ctx, principal.WorkspaceID, serverID)
 }
 
+func (s *Service) CheckMCPServerHealth(ctx context.Context, limit int) (string, error) {
+	servers, secrets, err := s.repo.ListEnabledServers(ctx, limit)
+	if err != nil {
+		return "", err
+	}
+	healthy := 0
+	unhealthy := 0
+	for index, server := range servers {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		secret, err := s.decryptSecret(secrets[index])
+		if err == nil {
+			_, err = s.client.Discover(ctx, server, secret)
+		}
+		now := time.Now().UTC()
+		if err != nil {
+			unhealthy++
+			_ = s.repo.UpdateServerHealth(ctx, server.WorkspaceID, server.ID, "unhealthy", sanitizeMCPError(err), nil)
+			continue
+		}
+		healthy++
+		_ = s.repo.UpdateServerHealth(ctx, server.WorkspaceID, server.ID, "healthy", "", &now)
+	}
+	return fmt.Sprintf("MCP server health checked=%d healthy=%d unhealthy=%d", len(servers), healthy, unhealthy), nil
+}
+
 func (s *Service) UpdateToolPermission(ctx context.Context, principal PrincipalContext, toolID string, mode string) error {
 	if mode != "deny" && mode != "ask" && mode != "allow" {
 		return fmt.Errorf("%w: permission mode is invalid", ErrInvalidInput)
@@ -272,4 +299,15 @@ func (s *Service) auditEvent(ctx context.Context, principal PrincipalContext, ev
 		UserAgent:   principal.UserAgent,
 		Metadata:    map[string]any{"mcp_server_id": serverID},
 	})
+}
+
+func sanitizeMCPError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(err.Error())
+	if len(message) > 500 {
+		message = message[:500]
+	}
+	return message
 }
