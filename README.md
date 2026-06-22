@@ -87,7 +87,7 @@ Run one web container and one worker container from the same image:
 docker compose -f compose.yaml up -d app worker
 ```
 
-The worker handles scheduled tasks, queued manual runs, lease recovery, retry execution, and maintenance task placeholders.
+The worker handles scheduled tasks, queued manual runs, lease renewal, lease recovery, retry execution, conversation summary jobs, provider/MCP health checks, cleanup jobs, and other typed maintenance tasks.
 
 ## MCP
 
