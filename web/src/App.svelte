@@ -2,360 +2,61 @@
   import { onMount } from 'svelte';
   import DOMPurify from 'dompurify';
   import { marked } from 'marked';
+  import ConversationSummaryPanel from './components/chat/ConversationSummaryPanel.svelte';
+  import PendingToolApprovals from './components/chat/PendingToolApprovals.svelte';
   import { deleteJSON, getJSON, postJSON, postStream, putJSON } from './lib/api';
+  import type {
+    Agent,
+    AgentResponse,
+    AgentsResponse,
+    Conversation,
+    ConversationResponse,
+    ConversationsResponse,
+    FeedbackListResponse,
+    FeedbackResponse,
+    FeedbackStats,
+    FeedbackStatsResponse,
+    MCPServer,
+    MCPServerResponse,
+    MCPServersResponse,
+    MCPTool,
+    MCPToolsResponse,
+    MemoriesResponse,
+    Memory,
+    MemoryResponse,
+    MemorySnippet,
+    Message,
+    MessageFeedback,
+    MessagesResponse,
+    ModelsResponse,
+    Provider,
+    ProviderModel,
+    ProviderResponse,
+    ProvidersResponse,
+    ReadyStatus,
+    ReplyDraftResponse,
+    ReplyPreset,
+    ReplyPresetResponse,
+    ReplyPresetsResponse,
+    Session,
+    SessionsResponse,
+    SetupStatus,
+    TaskRecord,
+    TaskResponse,
+    TaskRun,
+    TaskRunEvent,
+    TaskRunRecordResponse,
+    TaskRunResponse,
+    TaskRunsResponse,
+    TasksResponse,
+    ToolApprovalsResponse,
+    ToolCall,
+    ToolCallResponse,
+    ToolCard,
+    User,
+    UserResponse
+  } from './lib/types';
   import { strings } from './strings';
-
-  type User = {
-    id: string;
-    email: string;
-    display_name: string;
-    role: string;
-    workspace_id: string;
-  };
-
-  type Session = {
-    id: string;
-    ip_address?: string;
-    user_agent?: string;
-    expires_at: string;
-    created_at: string;
-  };
-
-  type Provider = {
-    id: string;
-    name: string;
-    base_url: string;
-    enabled: boolean;
-    request_timeout_ms: number;
-    default_model?: string;
-    fallback_model?: string;
-    health_status: string;
-    last_error?: string;
-    api_key_env_ref?: string;
-  };
-
-  type ProviderModel = {
-    id: string;
-    provider_id: string;
-    model_id: string;
-  };
-
-  type Conversation = {
-    id: string;
-    title: string;
-    agent_id?: string;
-    provider_id?: string;
-    model?: string;
-    summary?: string;
-    summary_status?: string;
-    summary_error?: string;
-    summary_updated_at?: string;
-    archived_at?: string;
-    updated_at: string;
-  };
-
-  type Message = {
-    id: string;
-    role: 'system' | 'user' | 'assistant' | 'tool';
-    content: string;
-    provider_id?: string;
-    model?: string;
-    total_tokens?: number;
-    created_at: string;
-  };
-
-  type Agent = {
-    id: string;
-    name: string;
-    description: string;
-    avatar: string;
-    system_prompt: string;
-    default_provider_id?: string;
-    default_model?: string;
-    memory_access_mode: string;
-    max_tool_iterations: number;
-    active: boolean;
-  };
-
-  type Memory = {
-    id: string;
-    title: string;
-    content: string;
-    tags: string[];
-    scope: string;
-    importance: number;
-    pinned: boolean;
-    active: boolean;
-    source: string;
-    use_count: number;
-  };
-
-  type MemorySnippet = {
-    id: string;
-    title: string;
-    content: string;
-    score: number;
-  };
-
-  type ToolCard = {
-    id: string;
-    name: string;
-    state: string;
-    result?: string;
-  };
-
-  type ToolCall = {
-    id: string;
-    chat_run_id: string;
-    provider_tool_call_id?: string;
-    provider_name?: string;
-    name: string;
-    input: string;
-    output?: string;
-    output_truncated?: boolean;
-    state: string;
-    approval_state: string;
-    error_message?: string;
-    created_at: string;
-  };
-
-  type MCPServer = {
-    id: string;
-    name: string;
-    transport_type: string;
-    command?: string;
-    http_url?: string;
-    enabled: boolean;
-    health_status: string;
-    last_error?: string;
-  };
-
-  type MCPTool = {
-    id: string;
-    server_id: string;
-    name: string;
-    description: string;
-    permission_mode: string;
-  };
-
-  type Task = {
-    id: string;
-    name: string;
-    description: string;
-    task_type: string;
-    state: string;
-    system_managed: boolean;
-    provider_id?: string;
-    model?: string;
-    prompt: string;
-    tool_policy: string;
-    max_retries: number;
-    timeout_ms: number;
-    concurrency_policy: string;
-  };
-
-  type TaskSchedule = {
-    id: string;
-    task_id: string;
-    mode: string;
-    cron_expression?: string;
-    interval_seconds?: number;
-    run_at?: string;
-    timezone: string;
-    enabled: boolean;
-    next_run_at?: string;
-  };
-
-  type TaskRecord = {
-    task: Task;
-    schedule: TaskSchedule;
-  };
-
-  type TaskRun = {
-    id: string;
-    task_id: string;
-    state: string;
-    attempt: number;
-    max_retries: number;
-    queued_at: string;
-    started_at?: string;
-    completed_at?: string;
-    result?: string;
-    error_message?: string;
-  };
-
-  type TaskRunEvent = {
-    id: string;
-    task_run_id: string;
-    level: string;
-    message: string;
-    created_at: string;
-  };
-
-  type MessageFeedback = {
-    id: string;
-    message_id: string;
-    rating: 'positive' | 'negative';
-    reason?: string;
-    comment?: string;
-  };
-
-  type FeedbackStats = {
-    positive: number;
-    negative: number;
-  };
-
-  type ReplyPreset = {
-    id: string;
-    name: string;
-    description: string;
-    prompt_instruction: string;
-    icon: string;
-    sort_order: number;
-    active: boolean;
-    system_default: boolean;
-  };
-
-  type ReplyDraft = {
-    id: string;
-    source_message_id: string;
-    preset_id?: string;
-    preset_name: string;
-    custom_instruction: string;
-    generated_draft: string;
-    provider_id?: string;
-    model?: string;
-    created_at: string;
-  };
-
-  type ReadyStatus = {
-    ready: boolean;
-    version: string;
-    database: {
-      ok: boolean;
-      driver?: string;
-      message?: string;
-    };
-    components: Record<string, string>;
-  };
-
-  type SetupStatus = {
-    available: boolean;
-  };
-
-  type UserResponse = {
-    user: User;
-  };
-
-  type SessionsResponse = {
-    sessions: Session[];
-  };
-
-  type ProvidersResponse = {
-    providers: Provider[];
-  };
-
-  type ProviderResponse = {
-    provider: Provider;
-  };
-
-  type ModelsResponse = {
-    models: ProviderModel[];
-  };
-
-  type ConversationsResponse = {
-    conversations: Conversation[];
-  };
-
-  type ConversationResponse = {
-    conversation: Conversation;
-  };
-
-  type MessagesResponse = {
-    messages: Message[];
-  };
-
-  type AgentsResponse = {
-    agents: Agent[];
-  };
-
-  type AgentResponse = {
-    agent: Agent;
-  };
-
-  type MemoriesResponse = {
-    memories: Memory[];
-  };
-
-  type MemoryResponse = {
-    memory: Memory;
-  };
-
-  type MCPServersResponse = {
-    servers: MCPServer[];
-  };
-
-  type MCPServerResponse = {
-    server: MCPServer;
-  };
-
-  type MCPToolsResponse = {
-    tools: MCPTool[];
-  };
-
-  type ToolApprovalsResponse = {
-    tool_calls: ToolCall[];
-  };
-
-  type ToolCallResponse = {
-    tool_call: ToolCall;
-  };
-
-  type TasksResponse = {
-    tasks: TaskRecord[];
-  };
-
-  type TaskResponse = {
-    task: Task;
-    schedule: TaskSchedule;
-  };
-
-  type TaskRunsResponse = {
-    runs: TaskRun[];
-  };
-
-  type TaskRunResponse = {
-    run: TaskRun;
-  };
-
-  type TaskRunRecordResponse = {
-    run: TaskRun;
-    events: TaskRunEvent[];
-  };
-
-  type FeedbackResponse = {
-    feedback: MessageFeedback;
-  };
-
-  type FeedbackListResponse = {
-    feedback: MessageFeedback[];
-  };
-
-  type FeedbackStatsResponse = {
-    stats: FeedbackStats;
-  };
-
-  type ReplyPresetsResponse = {
-    presets: ReplyPreset[];
-  };
-
-  type ReplyPresetResponse = {
-    preset: ReplyPreset;
-  };
-
-  type ReplyDraftResponse = {
-    draft: ReplyDraft;
-  };
 
   const navItems = [
     strings.nav.chat,
@@ -1464,32 +1165,11 @@
                 </select>
                 <input bind:value={selectedModel} aria-label="Model" placeholder="Model ID" />
               </div>
-              {#if selectedConversation}
-                <details class="summary-panel" open={Boolean(selectedConversation.summary)}>
-                  <summary>
-                    Conversation summary
-                    {#if selectedConversation.summary_status}
-                      <span>{selectedConversation.summary_status}</span>
-                    {/if}
-                  </summary>
-                  {#if selectedConversation.summary}
-                    <p>{selectedConversation.summary}</p>
-                    {#if selectedConversation.summary_updated_at}
-                      <small>Updated {new Date(selectedConversation.summary_updated_at).toLocaleString()}</small>
-                    {/if}
-                  {:else if selectedConversation.summary_error}
-                    <p>{selectedConversation.summary_error}</p>
-                  {:else}
-                    <p>No summary stored for this conversation.</p>
-                  {/if}
-                  <div class="message-actions">
-                    <button on:click={regenerateSummary} type="button">Regenerate summary</button>
-                    {#if selectedConversation.summary}
-                      <button on:click={clearSummary} type="button">Clear summary</button>
-                    {/if}
-                  </div>
-                </details>
-              {/if}
+              <ConversationSummaryPanel
+                conversation={selectedConversation}
+                onClear={clearSummary}
+                onRegenerate={regenerateSummary}
+              />
               <div class="message-list" aria-live="polite">
                 {#if messages.length === 0}
                   <p>{strings.chat.noMessages}</p>
@@ -1592,35 +1272,12 @@
                   {/each}
                 </section>
               {/if}
-              {#if pendingToolApprovals.length > 0}
-                <section class="tool-panel" aria-label="Pending tool approvals">
-                  <div class="panel-heading">
-                    <h2>Pending tool approvals</h2>
-                    <button on:click={refreshPendingToolApprovals} type="button">Refresh</button>
-                  </div>
-                  {#each pendingToolApprovals as toolCall (toolCall.id)}
-                    <article>
-                      <strong>{toolCall.name}</strong>
-                      <span>{toolCall.state}</span>
-                      <pre>{toolCall.input}</pre>
-                      {#if toolCall.error_message}
-                        <p>{toolCall.error_message}</p>
-                      {/if}
-                      <div class="message-actions">
-                        <button on:click={() => approveToolCall(toolCall, 'approve_once')} type="button">Approve once</button>
-                        <button on:click={() => approveToolCall(toolCall, 'approve_conversation')} type="button">
-                          Approve conversation
-                        </button>
-                        <button on:click={() => approveToolCall(toolCall, 'allow_agent')} type="button">Allow for agent</button>
-                        <button on:click={() => denyToolCall(toolCall, 'deny')} type="button">Deny</button>
-                        <button on:click={() => denyToolCall(toolCall, 'deny_disable_tool')} type="button">
-                          Deny and disable
-                        </button>
-                      </div>
-                    </article>
-                  {/each}
-                </section>
-              {/if}
+              <PendingToolApprovals
+                toolCalls={pendingToolApprovals}
+                onApprove={approveToolCall}
+                onDeny={denyToolCall}
+                onRefresh={refreshPendingToolApprovals}
+              />
               {#if runMemories.length > 0}
                 <details class="memory-panel" open>
                   <summary>{strings.chat.memoriesUsed}</summary>

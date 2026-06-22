@@ -1,8 +1,9 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vite';
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [svelte()],
+  ...(mode === 'test' ? { resolve: { conditions: ['browser'] } } : {}),
   server: {
     port: 5173,
     proxy: {
@@ -14,4 +15,4 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true
   }
-});
+}));
