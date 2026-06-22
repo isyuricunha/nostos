@@ -126,9 +126,19 @@
   let providerFallbackModel = '';
   let providerTimeoutMS = 60000;
   let providerEnabled = true;
+  let editingAgentId = '';
   let agentName = '';
+  let agentDescription = '';
+  let agentAvatar = 'sparkles';
   let agentPrompt = '';
+  let agentDefaultProviderId = '';
+  let agentDefaultModel = '';
+  let agentFallbackModel = '';
+  let agentTemperature = 0.7;
+  let agentMaxToolIterations = 8;
   let agentMemoryMode = 'pinned_only';
+  let agentToolPermissionDefault = 'ask';
+  let agentActive = true;
   let memoryTitle = '';
   let memoryContent = '';
   let memoryTags = '';
@@ -625,22 +635,62 @@
   }
 
   async function createAgent(): Promise<void> {
-    const response = await postJSON<AgentResponse>('/api/v1/agents', {
+    const payload = {
       name: agentName,
-      description: '',
-      avatar: 'sparkles',
+      description: agentDescription,
+      avatar: agentAvatar,
       system_prompt: agentPrompt,
-      temperature: 0.7,
-      max_tool_iterations: 8,
+      default_provider_id: agentDefaultProviderId,
+      default_model: agentDefaultModel,
+      fallback_model: agentFallbackModel,
+      temperature: agentTemperature,
+      max_tool_iterations: agentMaxToolIterations,
       memory_access_mode: agentMemoryMode,
-      tool_permission_default: 'ask',
-      active: true
-    });
-    agents = [response.agent, ...agents];
+      tool_permission_default: agentToolPermissionDefault,
+      active: agentActive
+    };
+    const agentBeingEdited = editingAgentId;
+    const response = agentBeingEdited
+      ? await putJSON<AgentResponse>(`/api/v1/agents/${agentBeingEdited}`, payload)
+      : await postJSON<AgentResponse>('/api/v1/agents', payload);
+    agents = agentBeingEdited
+      ? agents.map((agent) => (agent.id === response.agent.id ? response.agent : agent))
+      : [response.agent, ...agents];
     selectedAgentId = response.agent.id;
+    resetAgentForm();
+    notice = agentBeingEdited ? 'Agent updated.' : 'Agent saved.';
+  }
+
+  function editAgent(agent: Agent): void {
+    editingAgentId = agent.id;
+    agentName = agent.name;
+    agentDescription = agent.description;
+    agentAvatar = agent.avatar;
+    agentPrompt = agent.system_prompt;
+    agentDefaultProviderId = agent.default_provider_id ?? '';
+    agentDefaultModel = agent.default_model ?? '';
+    agentFallbackModel = agent.fallback_model ?? '';
+    agentTemperature = agent.temperature;
+    agentMaxToolIterations = agent.max_tool_iterations;
+    agentMemoryMode = agent.memory_access_mode;
+    agentToolPermissionDefault = agent.tool_permission_default;
+    agentActive = agent.active;
+  }
+
+  function resetAgentForm(): void {
+    editingAgentId = '';
     agentName = '';
+    agentDescription = '';
+    agentAvatar = 'sparkles';
     agentPrompt = '';
-    notice = 'Agent saved.';
+    agentDefaultProviderId = '';
+    agentDefaultModel = '';
+    agentFallbackModel = '';
+    agentTemperature = 0.7;
+    agentMaxToolIterations = 8;
+    agentMemoryMode = 'pinned_only';
+    agentToolPermissionDefault = 'ask';
+    agentActive = true;
   }
 
   async function duplicateAgent(agentId: string): Promise<void> {
@@ -1369,14 +1419,52 @@
         {:else if activeView === strings.nav.agents}
           <section class="providers-layout">
             <form class="panel" on:submit|preventDefault={createAgent}>
-              <h2>{strings.agents.add}</h2>
+              <div class="panel-heading">
+                <h2>{editingAgentId ? 'Edit agent' : strings.agents.add}</h2>
+                {#if editingAgentId}
+                  <button on:click={resetAgentForm} type="button">Cancel edit</button>
+                {/if}
+              </div>
               <label>
                 Name
                 <input bind:value={agentName} required />
               </label>
               <label>
+                Description
+                <input bind:value={agentDescription} />
+              </label>
+              <label>
+                Avatar or icon
+                <input bind:value={agentAvatar} />
+              </label>
+              <label>
                 System prompt
                 <textarea bind:value={agentPrompt} required></textarea>
+              </label>
+              <label>
+                Default provider
+                <select bind:value={agentDefaultProviderId}>
+                  <option value="">No default provider</option>
+                  {#each providers as provider (provider.id)}
+                    <option value={provider.id}>{provider.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <label>
+                Default model
+                <input bind:value={agentDefaultModel} />
+              </label>
+              <label>
+                Fallback model
+                <input bind:value={agentFallbackModel} />
+              </label>
+              <label>
+                Temperature
+                <input bind:value={agentTemperature} min="0" max="2" step="0.1" type="number" />
+              </label>
+              <label>
+                Maximum tool iterations
+                <input bind:value={agentMaxToolIterations} min="1" max="32" type="number" />
               </label>
               <label>
                 Memory mode
@@ -1387,7 +1475,19 @@
                   <option value="all">all</option>
                 </select>
               </label>
-              <button type="submit">{strings.agents.add}</button>
+              <label>
+                Default tool permission
+                <select bind:value={agentToolPermissionDefault}>
+                  <option value="deny">deny</option>
+                  <option value="ask">ask</option>
+                  <option value="allow">allow</option>
+                </select>
+              </label>
+              <label class="inline-check">
+                <input bind:checked={agentActive} type="checkbox" />
+                Active
+              </label>
+              <button type="submit">{editingAgentId ? 'Save agent' : strings.agents.add}</button>
             </form>
             <section class="panel">
               <div class="panel-heading">
@@ -1403,8 +1503,20 @@
                       <div>
                         <strong>{agent.name}</strong>
                         <span>{agent.memory_access_mode} / {agent.active ? 'active' : 'disabled'}</span>
+                        <span>
+                          tools {agent.tool_permission_default} / max iterations {agent.max_tool_iterations} / temp
+                          {agent.temperature}
+                        </span>
+                        {#if agent.default_provider_id || agent.default_model || agent.fallback_model}
+                          <span>
+                            {agent.default_provider_id ? 'provider configured' : ''}
+                            {agent.default_model ? ` / default ${agent.default_model}` : ''}
+                            {agent.fallback_model ? ` / fallback ${agent.fallback_model}` : ''}
+                          </span>
+                        {/if}
                       </div>
                       <div>
+                        <button on:click={() => editAgent(agent)} type="button">Edit</button>
                         <button on:click={() => duplicateAgent(agent.id)} type="button">{strings.agents.duplicate}</button>
                         <button on:click={() => deleteAgent(agent.id)} type="button">Delete</button>
                       </div>

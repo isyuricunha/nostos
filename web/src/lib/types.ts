@@ -70,8 +70,11 @@ export type Agent = {
   system_prompt: string;
   default_provider_id?: string;
   default_model?: string;
+  fallback_model?: string;
+  temperature: number;
   memory_access_mode: string;
   max_tool_iterations: number;
+  tool_permission_default: string;
   active: boolean;
 };
 
