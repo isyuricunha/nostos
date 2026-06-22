@@ -1,6 +1,10 @@
 package chat
 
-import "time"
+import (
+	"time"
+
+	"github.com/isyuricunha/nostos/internal/providers"
+)
 
 const (
 	RoleSystem    = "system"
@@ -34,19 +38,21 @@ type Conversation struct {
 }
 
 type Message struct {
-	ID               string    `json:"id"`
-	ConversationID   string    `json:"conversation_id"`
-	BranchID         string    `json:"branch_id,omitempty"`
-	ParentMessageID  string    `json:"parent_message_id,omitempty"`
-	Role             string    `json:"role"`
-	Content          string    `json:"content"`
-	ProviderID       string    `json:"provider_id,omitempty"`
-	Model            string    `json:"model,omitempty"`
-	PromptTokens     int       `json:"prompt_tokens,omitempty"`
-	CompletionTokens int       `json:"completion_tokens,omitempty"`
-	TotalTokens      int       `json:"total_tokens,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               string               `json:"id"`
+	ConversationID   string               `json:"conversation_id"`
+	BranchID         string               `json:"branch_id,omitempty"`
+	ParentMessageID  string               `json:"parent_message_id,omitempty"`
+	Role             string               `json:"role"`
+	Content          string               `json:"content"`
+	ToolCallID       string               `json:"tool_call_id,omitempty"`
+	ToolCalls        []providers.ToolCall `json:"tool_calls,omitempty"`
+	ProviderID       string               `json:"provider_id,omitempty"`
+	Model            string               `json:"model,omitempty"`
+	PromptTokens     int                  `json:"prompt_tokens,omitempty"`
+	CompletionTokens int                  `json:"completion_tokens,omitempty"`
+	TotalTokens      int                  `json:"total_tokens,omitempty"`
+	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
 }
 
 type ChatRun struct {

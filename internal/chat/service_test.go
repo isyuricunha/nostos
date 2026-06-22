@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,6 +101,171 @@ func TestRunStreamsAndPersistsConversation(t *testing.T) {
 	}
 }
 
+func TestRunSendsPersistedMultiTurnHistoryToProvider(t *testing.T) {
+	ctx := context.Background()
+	var recorder requestRecorder
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		messages := recorder.record(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if containsContent(messages, "What is my name?") {
+			writeStreamContent(w, "Your name is Yuri.")
+			return
+		}
+		writeStreamContent(w, "Nice to meet you, Yuri.")
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newChatTestContext(t)
+	defer cleanup()
+	authRepo := auth.NewSQLRepository(store)
+	providerClient := providers.NewOpenAIClient()
+	providerService := providers.NewService(cfg, providers.NewSQLRepository(store), authRepo, providerClient)
+	apiKey := "test-api-key"
+	provider, err := providerService.Create(ctx, providers.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, providers.ProviderInput{
+		Name:             "Mock",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	service := NewService(cfg, NewSQLRepository(store), providerService, providerClient, fakeAgentResolver{}, &fakeMemoryProvider{})
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	conversation, err := service.CreateConversation(ctx, principal, Conversation{Title: "Memory-free chat", ProviderID: provider.ID, Model: "mock-model"})
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	if err := service.Run(ctx, principal, conversation.ID, RunInput{Content: "My name is Yuri."}, noopSink); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if err := service.Run(ctx, principal, conversation.ID, RunInput{Content: "What is my name?"}, noopSink); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	requests := recorder.requests()
+	if len(requests) != 2 {
+		t.Fatalf("expected two provider requests, got %d", len(requests))
+	}
+	second := requests[1]
+	if !containsContent(second, "My name is Yuri.") {
+		t.Fatalf("second provider request did not include first user turn: %#v", second)
+	}
+	if !containsContent(second, "Nice to meet you, Yuri.") {
+		t.Fatalf("second provider request did not include first assistant turn: %#v", second)
+	}
+	if countContent(second, "What is my name?") != 1 {
+		t.Fatalf("current user message should appear exactly once: %#v", second)
+	}
+}
+
+func TestBranchContextExcludesSiblingMessagesInProviderRequest(t *testing.T) {
+	ctx := context.Background()
+	var recorder requestRecorder
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		messages := recorder.record(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch {
+		case containsContent(messages, "Edited branch route"):
+			writeStreamContent(w, "Edited branch response.")
+		case containsContent(messages, "Sibling-only detail"):
+			writeStreamContent(w, "Sibling detail acknowledged.")
+		default:
+			writeStreamContent(w, "Root response.")
+		}
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newChatTestContext(t)
+	defer cleanup()
+	authRepo := auth.NewSQLRepository(store)
+	providerClient := providers.NewOpenAIClient()
+	providerService := providers.NewService(cfg, providers.NewSQLRepository(store), authRepo, providerClient)
+	apiKey := "test-api-key"
+	provider, err := providerService.Create(ctx, providers.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, providers.ProviderInput{
+		Name:             "Mock",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	service := NewService(cfg, NewSQLRepository(store), providerService, providerClient, fakeAgentResolver{}, &fakeMemoryProvider{})
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	conversation, err := service.CreateConversation(ctx, principal, Conversation{Title: "Branch chat", ProviderID: provider.ID, Model: "mock-model"})
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	if err := service.Run(ctx, principal, conversation.ID, RunInput{Content: "Original route"}, noopSink); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	messages, err := service.ListMessages(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("list messages after first run: %v", err)
+	}
+	firstUserID := messages[0].ID
+	if err := service.Run(ctx, principal, conversation.ID, RunInput{Content: "Sibling-only detail"}, noopSink); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if err := service.EditAndBranch(ctx, principal, firstUserID, RunInput{Content: "Edited branch route"}, noopSink); err != nil {
+		t.Fatalf("edit branch run: %v", err)
+	}
+	requests := recorder.requests()
+	if len(requests) != 3 {
+		t.Fatalf("expected three provider requests, got %d", len(requests))
+	}
+	branchRequest := requests[2]
+	if !containsContent(branchRequest, "Edited branch route") {
+		t.Fatalf("branch request did not include edited branch message: %#v", branchRequest)
+	}
+	if containsContent(branchRequest, "Sibling-only detail") || containsContent(branchRequest, "Sibling detail acknowledged.") {
+		t.Fatalf("branch request included sibling-only messages: %#v", branchRequest)
+	}
+}
+
+func TestBuildPromptMessagesPreservesToolCallsAndResults(t *testing.T) {
+	now := time.Now().UTC()
+	result := BuildPromptMessages(ContextRequest{
+		Conversation: Conversation{Summary: "The user is debugging service health."},
+		Agent:        AgentContext{SystemPrompt: "Use tools carefully."},
+		Messages: []Message{
+			{ID: "msg_user", Role: RoleUser, Content: "Check API status", CreatedAt: now},
+			{ID: "msg_assistant_tool", ParentMessageID: "msg_user", Role: RoleAssistant, ToolCalls: []providers.ToolCall{{
+				ID:   "call_1",
+				Type: "function",
+				Function: providers.ToolCallFunction{
+					Name:      "lookup_status",
+					Arguments: `{"service":"api"}`,
+				},
+			}}, CreatedAt: now.Add(time.Second)},
+			{ID: "msg_tool", ParentMessageID: "msg_assistant_tool", Role: RoleTool, ToolCallID: "call_1", Content: "api is healthy", CreatedAt: now.Add(2 * time.Second)},
+			{ID: "msg_current", ParentMessageID: "msg_tool", Role: RoleUser, Content: "What did the tool say?", CreatedAt: now.Add(3 * time.Second)},
+		},
+		CurrentUserMessageID: "msg_current",
+		RecentMessageLimit:   30,
+		ContextThreshold:     60000,
+	})
+	if !containsToolCall(result.Messages, "call_1", "lookup_status") {
+		t.Fatalf("assistant tool call was not reconstructed: %#v", result.Messages)
+	}
+	if !containsToolResult(result.Messages, "call_1", "api is healthy") {
+		t.Fatalf("tool result was not reconstructed: %#v", result.Messages)
+	}
+	if countContent(result.Messages, "What did the tool say?") != 1 {
+		t.Fatalf("current user message should appear exactly once: %#v", result.Messages)
+	}
+}
+
 func TestRunExecutesAllowedToolAndStreamsFollowup(t *testing.T) {
 	ctx := context.Background()
 	requestCount := 0
@@ -187,6 +353,79 @@ func TestRunExecutesAllowedToolAndStreamsFollowup(t *testing.T) {
 	if !containsEvent(events, "tool_result") {
 		t.Fatalf("tool result event was not emitted: %#v", events)
 	}
+}
+
+type requestRecorder struct {
+	mu       sync.Mutex
+	messages [][]providers.ChatMessage
+}
+
+func (r *requestRecorder) record(t *testing.T, request *http.Request) []providers.ChatMessage {
+	t.Helper()
+	var body struct {
+		Messages []providers.ChatMessage `json:"messages"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		t.Fatalf("decode provider request: %v", err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copied := append([]providers.ChatMessage{}, body.Messages...)
+	r.messages = append(r.messages, copied)
+	return copied
+}
+
+func (r *requestRecorder) requests() [][]providers.ChatMessage {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]providers.ChatMessage, len(r.messages))
+	for index := range r.messages {
+		out[index] = append([]providers.ChatMessage{}, r.messages[index]...)
+	}
+	return out
+}
+
+func noopSink(event string, payload any) error {
+	return nil
+}
+
+func writeStreamContent(w http.ResponseWriter, content string) {
+	fmt.Fprintf(w, `data: {"choices":[{"delta":{"content":%q}}]}`+"\n\n", content)
+	fmt.Fprintln(w, `data: [DONE]`)
+}
+
+func containsContent(messages []providers.ChatMessage, content string) bool {
+	return countContent(messages, content) > 0
+}
+
+func countContent(messages []providers.ChatMessage, content string) int {
+	count := 0
+	for _, message := range messages {
+		if message.Content == content {
+			count++
+		}
+	}
+	return count
+}
+
+func containsToolCall(messages []providers.ChatMessage, id string, name string) bool {
+	for _, message := range messages {
+		for _, call := range message.ToolCalls {
+			if call.ID == id && call.Function.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsToolResult(messages []providers.ChatMessage, id string, content string) bool {
+	for _, message := range messages {
+		if message.Role == RoleTool && message.ToolCallID == id && message.Content == content {
+			return true
+		}
+	}
+	return false
 }
 
 type fakeAgentResolver struct{}

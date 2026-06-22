@@ -149,13 +149,18 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 	if model == "" {
 		return fmt.Errorf("%w: model is required", ErrInvalidInput)
 	}
+	parentMessageID, err := s.lastContextMessageID(ctx, principal, conversation.ID, "")
+	if err != nil {
+		return err
+	}
 
 	userMessage, err := s.repo.CreateMessage(ctx, Message{
-		ConversationID: conversation.ID,
-		Role:           RoleUser,
-		Content:        content,
-		ProviderID:     provider.ID,
-		Model:          model,
+		ConversationID:  conversation.ID,
+		ParentMessageID: parentMessageID,
+		Role:            RoleUser,
+		Content:         content,
+		ProviderID:      provider.ID,
+		Model:           model,
 	})
 	if err != nil {
 		return err
@@ -191,6 +196,10 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 			return err
 		}
 	}
+	promptMessages, err := s.contextMessages(ctx, principal, conversation, agent, memories, userMessage.ID, assistantMessage.ID, "")
+	if err != nil {
+		return err
+	}
 	if err := sink("run_started", map[string]any{"run": run, "user_message": userMessage, "assistant_message": assistantMessage}); err != nil {
 		return err
 	}
@@ -206,7 +215,7 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 		Provider: provider,
 		APIKey:   apiKey,
 		Model:    model,
-		Messages: s.promptMessages(conversation, agent, memories, content),
+		Messages: promptMessages,
 		Tools:    s.allowedTools(ctx, principal.WorkspaceID),
 	})
 	if err != nil {
@@ -278,7 +287,7 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 		}
 	}
 	if toolReady {
-		return s.executeToolFollowup(ctx, principal, run.ID, assistantMessage.ID, provider, apiKey, model, conversation, agent, memories, content, toolCalls, sink)
+		return s.executeToolFollowup(ctx, principal, run.ID, assistantMessage.ID, provider, apiKey, model, promptMessages, toolCalls, sink)
 	}
 	_ = s.repo.UpdateRunState(ctx, run.ID, RunCompleted, "", "", true)
 	return sink("run_completed", map[string]any{"run_id": run.ID, "assistant_message_id": assistantMessage.ID})
@@ -310,7 +319,7 @@ func (s *Service) Regenerate(ctx context.Context, principal PrincipalContext, as
 	if instruction := strings.TrimSpace(input.RegenerationInstruction); instruction != "" {
 		input.Content += "\n\nRegeneration instruction:\n" + instruction
 	}
-	return s.runOnBranch(ctx, principal, run.ConversationID, branch.ID, input, sink)
+	return s.runOnBranch(ctx, principal, run.ConversationID, branch, input, sink)
 }
 
 func (s *Service) EditAndBranch(ctx context.Context, principal PrincipalContext, messageID string, input RunInput, sink StreamSink) error {
@@ -330,10 +339,10 @@ func (s *Service) EditAndBranch(ctx context.Context, principal PrincipalContext,
 	if err != nil {
 		return err
 	}
-	return s.runOnBranch(ctx, principal, message.ConversationID, branch.ID, input, sink)
+	return s.runOnBranch(ctx, principal, message.ConversationID, branch, input, sink)
 }
 
-func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, conversationID string, branchID string, input RunInput, sink StreamSink) error {
+func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, conversationID string, branch Branch, input RunInput, sink StreamSink) error {
 	if strings.TrimSpace(input.Content) == "" {
 		return fmt.Errorf("%w: message content is required", ErrInvalidInput)
 	}
@@ -367,19 +376,20 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 		model = provider.DefaultModel
 	}
 	userMessage, err := s.repo.CreateMessage(ctx, Message{
-		ConversationID: conversationID,
-		BranchID:       branchID,
-		Role:           RoleUser,
-		Content:        strings.TrimSpace(input.Content),
-		ProviderID:     provider.ID,
-		Model:          model,
+		ConversationID:  conversationID,
+		BranchID:        branch.ID,
+		ParentMessageID: branch.ParentMessageID,
+		Role:            RoleUser,
+		Content:         strings.TrimSpace(input.Content),
+		ProviderID:      provider.ID,
+		Model:           model,
 	})
 	if err != nil {
 		return err
 	}
 	assistantMessage, err := s.repo.CreateMessage(ctx, Message{
 		ConversationID:  conversationID,
-		BranchID:        branchID,
+		BranchID:        branch.ID,
 		ParentMessageID: userMessage.ID,
 		Role:            RoleAssistant,
 		ProviderID:      provider.ID,
@@ -392,7 +402,7 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 		ConversationID:     conversationID,
 		UserMessageID:      userMessage.ID,
 		AssistantMessageID: assistantMessage.ID,
-		BranchID:           branchID,
+		BranchID:           branch.ID,
 		ProviderID:         provider.ID,
 		Model:              model,
 	})
@@ -414,11 +424,15 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 			return err
 		}
 	}
+	promptMessages, err := s.contextMessages(ctx, principal, conversation, agent, memories, userMessage.ID, assistantMessage.ID, branch.ID)
+	if err != nil {
+		return err
+	}
 	events, err := s.client.StreamChat(ctx, providers.StreamRequest{
 		Provider: provider,
 		APIKey:   apiKey,
 		Model:    model,
-		Messages: s.promptMessages(conversation, agent, memories, input.Content),
+		Messages: promptMessages,
 	})
 	if err != nil {
 		_ = s.repo.UpdateRunState(ctx, run.ID, RunFailed, "provider_unavailable", err.Error(), true)
@@ -485,10 +499,7 @@ func (s *Service) executeToolFollowup(
 	provider providers.Provider,
 	apiKey string,
 	model string,
-	conversation Conversation,
-	agent AgentContext,
-	memories []MemorySnippet,
-	content string,
+	baseMessages []providers.ChatMessage,
 	toolCalls []providers.ToolCall,
 	sink StreamSink,
 ) error {
@@ -498,7 +509,7 @@ func (s *Service) executeToolFollowup(
 		_ = sink("tool_approval_required", map[string]any{"run_id": runID, "message": message})
 		return errors.New(message)
 	}
-	messages := s.promptMessages(conversation, agent, memories, content)
+	messages := append([]providers.ChatMessage{}, baseMessages...)
 	messages = append(messages, providers.ChatMessage{Role: "assistant", ToolCalls: toolCalls})
 	for _, call := range toolCalls {
 		result, err := s.tools.ExecuteAllowedTool(ctx, principal.WorkspaceID, call.Function.Name, call.Function.Arguments)
@@ -589,26 +600,48 @@ func (s *Service) selectMemories(ctx context.Context, principal PrincipalContext
 	})
 }
 
-func (s *Service) promptMessages(conversation Conversation, agent AgentContext, memories []MemorySnippet, latestContent string) []providers.ChatMessage {
-	messages := make([]providers.ChatMessage, 0, 4)
-	if agent.SystemPrompt != "" {
-		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: agent.SystemPrompt})
+func (s *Service) contextMessages(
+	ctx context.Context,
+	principal PrincipalContext,
+	conversation Conversation,
+	agent AgentContext,
+	memories []MemorySnippet,
+	currentUserMessageID string,
+	assistantPlaceholderID string,
+	branchID string,
+) ([]providers.ChatMessage, error) {
+	messages, err := s.repo.ListMessages(ctx, principal.WorkspaceID, principal.UserID, conversation.ID)
+	if err != nil {
+		return nil, err
 	}
-	if conversation.Summary != "" {
-		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: "Conversation summary:\n" + conversation.Summary})
+	result := BuildPromptMessages(ContextRequest{
+		Conversation:           conversation,
+		Agent:                  agent,
+		Memories:               memories,
+		Messages:               messages,
+		CurrentUserMessageID:   currentUserMessageID,
+		AssistantPlaceholderID: assistantPlaceholderID,
+		BranchID:               branchID,
+		RecentMessageLimit:     s.cfg.Chat.RecentMessageLimit,
+		ContextThreshold:       s.cfg.Chat.ContextThreshold,
+	})
+	return result.Messages, nil
+}
+
+func (s *Service) lastContextMessageID(ctx context.Context, principal PrincipalContext, conversationID string, branchID string) (string, error) {
+	messages, err := s.repo.ListMessages(ctx, principal.WorkspaceID, principal.UserID, conversationID)
+	if err != nil {
+		return "", err
 	}
-	if len(memories) > 0 {
-		var builder strings.Builder
-		builder.WriteString("Explicit memories selected for this run:\n")
-		for _, memory := range memories {
-			builder.WriteString("- ")
-			builder.WriteString(memory.Title)
-			builder.WriteString(": ")
-			builder.WriteString(memory.Content)
-			builder.WriteString("\n")
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if message.BranchID != branchID {
+			continue
 		}
-		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: builder.String()})
+		if message.Role == RoleAssistant && strings.TrimSpace(message.Content) == "" && len(message.ToolCalls) == 0 {
+			continue
+		}
+		return message.ID, nil
 	}
-	messages = append(messages, providers.ChatMessage{Role: RoleUser, Content: latestContent})
-	return messages
+	return "", nil
 }

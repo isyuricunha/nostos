@@ -3,12 +3,14 @@ package chat
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
 	"github.com/isyuricunha/nostos/internal/database"
 	"github.com/isyuricunha/nostos/internal/id"
+	"github.com/isyuricunha/nostos/internal/providers"
 )
 
 var ErrNotFound = errors.New("chat record not found")
@@ -144,11 +146,11 @@ func (r *SQLRepository) CreateMessage(ctx context.Context, message Message) (Mes
 	message.ID = id.New()
 	message.CreatedAt = now
 	message.UpdatedAt = now
-	query := `INSERT INTO messages (id, conversation_id, branch_id, parent_message_id, role, content, markdown, provider_id, model, created_at, updated_at)
-VALUES (` + placeholders(r.store, 11) + `)`
+	query := `INSERT INTO messages (id, conversation_id, branch_id, parent_message_id, role, content, markdown, tool_call_id, provider_id, model, metadata, created_at, updated_at)
+VALUES (` + placeholders(r.store, 13) + `)`
 	_, err := r.store.DB.ExecContext(ctx, query,
 		message.ID, message.ConversationID, nullableString(message.BranchID), nullableString(message.ParentMessageID),
-		message.Role, message.Content, message.Content, nullableString(message.ProviderID), nullableString(message.Model),
+		message.Role, message.Content, message.Content, nullableString(message.ToolCallID), nullableString(message.ProviderID), nullableString(message.Model), messageMetadata(message),
 		r.store.NowArg(now), r.store.NowArg(now),
 	)
 	return message, err
@@ -156,7 +158,7 @@ VALUES (` + placeholders(r.store, 11) + `)`
 
 func (r *SQLRepository) GetMessage(ctx context.Context, workspaceID string, ownerUserID string, messageID string) (Message, error) {
 	query := `SELECT m.id, m.conversation_id, m.branch_id, m.parent_message_id, m.role, m.content, m.provider_id, m.model,
-m.prompt_tokens, m.completion_tokens, m.total_tokens, m.created_at, m.updated_at
+m.tool_call_id, m.metadata, m.prompt_tokens, m.completion_tokens, m.total_tokens, m.created_at, m.updated_at
 FROM messages m JOIN conversations c ON c.id = m.conversation_id
 WHERE c.workspace_id = ` + r.store.Placeholder(1) + ` AND c.owner_user_id = ` + r.store.Placeholder(2) + ` AND m.id = ` + r.store.Placeholder(3)
 	item, err := scanMessage(r.store.DB.QueryRowContext(ctx, query, workspaceID, ownerUserID, messageID))
@@ -323,7 +325,7 @@ func (r *SQLRepository) queryMessages(ctx context.Context, query string, args ..
 
 func messageSelect(store *database.Store) string {
 	return `SELECT m.id, m.conversation_id, m.branch_id, m.parent_message_id, m.role, m.content, m.provider_id, m.model,
-m.prompt_tokens, m.completion_tokens, m.total_tokens, m.created_at, m.updated_at
+m.tool_call_id, m.metadata, m.prompt_tokens, m.completion_tokens, m.total_tokens, m.created_at, m.updated_at
 FROM messages m JOIN conversations c ON c.id = m.conversation_id`
 }
 
@@ -374,17 +376,21 @@ func scanMessage(row rowScanner) (Message, error) {
 	var parentID sql.NullString
 	var providerID sql.NullString
 	var model sql.NullString
+	var toolCallID sql.NullString
+	var metadataRaw any
 	var prompt sql.NullInt64
 	var completion sql.NullInt64
 	var total sql.NullInt64
 	var createdRaw any
 	var updatedRaw any
 	if err := row.Scan(&item.ID, &item.ConversationID, &branchID, &parentID, &item.Role, &item.Content, &providerID, &model,
-		&prompt, &completion, &total, &createdRaw, &updatedRaw); err != nil {
+		&toolCallID, &metadataRaw, &prompt, &completion, &total, &createdRaw, &updatedRaw); err != nil {
 		return Message{}, err
 	}
 	item.BranchID = branchID.String
 	item.ParentMessageID = parentID.String
+	item.ToolCallID = toolCallID.String
+	item.ToolCalls = toolCallsFromMetadata(metadataRaw)
 	item.ProviderID = providerID.String
 	item.Model = model.String
 	item.PromptTokens = int(prompt.Int64)
@@ -508,4 +514,40 @@ func timePtrArg(store *database.Store, value *time.Time) any {
 		return nil
 	}
 	return store.NowArg(*value)
+}
+
+func messageMetadata(message Message) string {
+	payload := map[string]any{}
+	if len(message.ToolCalls) > 0 {
+		payload["tool_calls"] = message.ToolCalls
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
+}
+
+func toolCallsFromMetadata(raw any) []providers.ToolCall {
+	var text string
+	switch typed := raw.(type) {
+	case nil:
+		return nil
+	case string:
+		text = typed
+	case []byte:
+		text = string(typed)
+	default:
+		return nil
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	var payload struct {
+		ToolCalls []providers.ToolCall `json:"tool_calls"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return nil
+	}
+	return payload.ToolCalls
 }
