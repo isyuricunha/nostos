@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yuricunha/nostos/internal/database"
-	"github.com/yuricunha/nostos/internal/id"
+	"github.com/isyuricunha/nostos/internal/database"
+	"github.com/isyuricunha/nostos/internal/id"
 )
 
 var ErrNotFound = errors.New("reply record not found")

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yuricunha/nostos/internal/auth"
-	"github.com/yuricunha/nostos/internal/config"
-	"github.com/yuricunha/nostos/internal/database"
+	"github.com/isyuricunha/nostos/internal/auth"
+	"github.com/isyuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/database"
 )
 
 func TestProviderCreateEncryptsSecretAndRefreshesModels(t *testing.T) {

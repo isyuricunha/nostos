@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yuricunha/nostos/internal/chat"
+	"github.com/isyuricunha/nostos/internal/chat"
 )
 
 var ErrInvalidInput = errors.New("invalid memory input")

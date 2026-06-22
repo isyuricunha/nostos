@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/yuricunha/nostos/internal/feedback"
+	"github.com/isyuricunha/nostos/internal/feedback"
 )
 
 type feedbackHandler struct {

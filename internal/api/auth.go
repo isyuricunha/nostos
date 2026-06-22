@@ -11,8 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/yuricunha/nostos/internal/auth"
-	"github.com/yuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/auth"
+	"github.com/isyuricunha/nostos/internal/config"
 )
 
 type AuthDeps struct {

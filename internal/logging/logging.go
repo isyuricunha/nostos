@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/yuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/config"
 )
 
 func New(cfg config.Config) *slog.Logger {

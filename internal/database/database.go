@@ -14,7 +14,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
-	"github.com/yuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/config"
 )
 
 type Store struct {

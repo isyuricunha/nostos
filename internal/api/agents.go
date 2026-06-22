@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/yuricunha/nostos/internal/agents"
+	"github.com/isyuricunha/nostos/internal/agents"
 )
 
 type agentsHandler struct {

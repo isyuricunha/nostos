@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yuricunha/nostos/internal/config"
-	"github.com/yuricunha/nostos/internal/providers"
+	"github.com/isyuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/providers"
 )
 
 var ErrInvalidInput = errors.New("invalid reply input")

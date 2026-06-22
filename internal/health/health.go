@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/yuricunha/nostos/internal/database"
+	"github.com/isyuricunha/nostos/internal/database"
 )
 
 type Service struct {

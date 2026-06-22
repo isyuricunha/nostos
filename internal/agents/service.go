@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yuricunha/nostos/internal/chat"
+	"github.com/isyuricunha/nostos/internal/chat"
 )
 
 var ErrInvalidInput = errors.New("invalid agent input")

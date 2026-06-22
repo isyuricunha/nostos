@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yuricunha/nostos/internal/auth"
-	"github.com/yuricunha/nostos/internal/config"
-	"github.com/yuricunha/nostos/internal/crypto"
-	"github.com/yuricunha/nostos/internal/providers"
+	"github.com/isyuricunha/nostos/internal/auth"
+	"github.com/isyuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/crypto"
+	"github.com/isyuricunha/nostos/internal/providers"
 )
 
 var (

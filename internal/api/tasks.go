@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/yuricunha/nostos/internal/tasks"
+	"github.com/isyuricunha/nostos/internal/tasks"
 )
 
 type tasksHandler struct {

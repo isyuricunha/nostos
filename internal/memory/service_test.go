@@ -3,7 +3,7 @@ package memory
 import (
 	"testing"
 
-	"github.com/yuricunha/nostos/internal/chat"
+	"github.com/isyuricunha/nostos/internal/chat"
 )
 
 func TestRankMemoriesPrefersPinnedAndRelevant(t *testing.T) {

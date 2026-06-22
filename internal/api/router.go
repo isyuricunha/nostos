@@ -16,16 +16,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/yuricunha/nostos/internal/agents"
-	"github.com/yuricunha/nostos/internal/chat"
-	"github.com/yuricunha/nostos/internal/config"
-	"github.com/yuricunha/nostos/internal/feedback"
-	"github.com/yuricunha/nostos/internal/health"
-	"github.com/yuricunha/nostos/internal/mcp"
-	"github.com/yuricunha/nostos/internal/memory"
-	"github.com/yuricunha/nostos/internal/providers"
-	"github.com/yuricunha/nostos/internal/replies"
-	"github.com/yuricunha/nostos/internal/tasks"
+	"github.com/isyuricunha/nostos/internal/agents"
+	"github.com/isyuricunha/nostos/internal/chat"
+	"github.com/isyuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/feedback"
+	"github.com/isyuricunha/nostos/internal/health"
+	"github.com/isyuricunha/nostos/internal/mcp"
+	"github.com/isyuricunha/nostos/internal/memory"
+	"github.com/isyuricunha/nostos/internal/providers"
+	"github.com/isyuricunha/nostos/internal/replies"
+	"github.com/isyuricunha/nostos/internal/tasks"
 )
 
 type RouterDeps struct {

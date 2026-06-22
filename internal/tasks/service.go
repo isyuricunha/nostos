@@ -9,9 +9,9 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"github.com/yuricunha/nostos/internal/auth"
-	"github.com/yuricunha/nostos/internal/config"
-	"github.com/yuricunha/nostos/internal/providers"
+	"github.com/isyuricunha/nostos/internal/auth"
+	"github.com/isyuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/providers"
 )
 
 var ErrInvalidInput = errors.New("invalid task input")

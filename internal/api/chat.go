@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/yuricunha/nostos/internal/chat"
+	"github.com/isyuricunha/nostos/internal/chat"
 )
 
 type chatHandler struct {

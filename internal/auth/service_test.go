@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yuricunha/nostos/internal/config"
-	"github.com/yuricunha/nostos/internal/crypto"
-	"github.com/yuricunha/nostos/internal/database"
-	"github.com/yuricunha/nostos/internal/id"
+	"github.com/isyuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/crypto"
+	"github.com/isyuricunha/nostos/internal/database"
+	"github.com/isyuricunha/nostos/internal/id"
 )
 
 func TestOwnerSetupLoginAndSessionList(t *testing.T) {

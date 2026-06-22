@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/yuricunha/nostos/internal/config"
-	"github.com/yuricunha/nostos/internal/database"
+	"github.com/isyuricunha/nostos/internal/config"
+	"github.com/isyuricunha/nostos/internal/database"
 )
 
 func TestSQLiteMigrationsIntegration(t *testing.T) {

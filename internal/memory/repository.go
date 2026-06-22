@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yuricunha/nostos/internal/chat"
-	"github.com/yuricunha/nostos/internal/database"
-	"github.com/yuricunha/nostos/internal/id"
+	"github.com/isyuricunha/nostos/internal/chat"
+	"github.com/isyuricunha/nostos/internal/database"
+	"github.com/isyuricunha/nostos/internal/id"
 )
 
 var ErrNotFound = errors.New("memory not found")
