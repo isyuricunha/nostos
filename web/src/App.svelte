@@ -139,10 +139,14 @@
   let agentMemoryMode = 'pinned_only';
   let agentToolPermissionDefault = 'ask';
   let agentActive = true;
+  let editingMemoryId = '';
   let memoryTitle = '';
   let memoryContent = '';
   let memoryTags = '';
+  let memoryScope = 'global';
+  let memoryImportance = 70;
   let memoryPinned = true;
+  let memoryActive = true;
   let editingMCPServerId = '';
   let mcpName = '';
   let mcpDescription = '';
@@ -729,24 +733,50 @@
   }
 
   async function createMemory(): Promise<void> {
-    const response = await postJSON<MemoryResponse>('/api/v1/memories', {
+    const payload = {
       title: memoryTitle,
       content: memoryContent,
       tags: memoryTags
         .split(',')
         .map((tag) => tag.trim())
         .filter(Boolean),
-      scope: 'global',
-      importance: 70,
+      scope: memoryScope,
+      importance: memoryImportance,
       pinned: memoryPinned,
-      active: true,
+      active: memoryActive,
       source: 'manual'
-    });
-    memories = [response.memory, ...memories];
+    };
+    const memoryBeingEdited = editingMemoryId;
+    const response = memoryBeingEdited
+      ? await putJSON<MemoryResponse>(`/api/v1/memories/${memoryBeingEdited}`, payload)
+      : await postJSON<MemoryResponse>('/api/v1/memories', payload);
+    memories = memoryBeingEdited
+      ? memories.map((memory) => (memory.id === response.memory.id ? response.memory : memory))
+      : [response.memory, ...memories];
+    resetMemoryForm();
+    notice = memoryBeingEdited ? 'Memory updated.' : 'Memory saved.';
+  }
+
+  function editMemory(memory: Memory): void {
+    editingMemoryId = memory.id;
+    memoryTitle = memory.title;
+    memoryContent = memory.content;
+    memoryTags = memory.tags.join(', ');
+    memoryScope = memory.scope;
+    memoryImportance = memory.importance;
+    memoryPinned = memory.pinned;
+    memoryActive = memory.active;
+  }
+
+  function resetMemoryForm(): void {
+    editingMemoryId = '';
     memoryTitle = '';
     memoryContent = '';
     memoryTags = '';
-    notice = 'Memory saved.';
+    memoryScope = 'global';
+    memoryImportance = 70;
+    memoryPinned = true;
+    memoryActive = true;
   }
 
   async function deleteMemory(memoryId: string): Promise<void> {
@@ -754,6 +784,9 @@
       return;
     }
     await deleteJSON<{ ok: boolean }>(`/api/v1/memories/${memoryId}`);
+    if (editingMemoryId === memoryId) {
+      resetMemoryForm();
+    }
     await refreshMemories();
   }
 
@@ -1657,7 +1690,12 @@
         {:else if activeView === strings.nav.memories}
           <section class="providers-layout">
             <form class="panel" on:submit|preventDefault={createMemory}>
-              <h2>{strings.memories.add}</h2>
+              <div class="panel-heading">
+                <h2>{editingMemoryId ? 'Edit memory' : strings.memories.add}</h2>
+                {#if editingMemoryId}
+                  <button on:click={resetMemoryForm} type="button">Cancel edit</button>
+                {/if}
+              </div>
               <label>
                 Title
                 <input bind:value={memoryTitle} required />
@@ -1670,11 +1708,28 @@
                 Tags
                 <input bind:value={memoryTags} placeholder="project, preference" />
               </label>
+              <label>
+                Scope
+                <select bind:value={memoryScope}>
+                  <option value="global">global</option>
+                  <option value="workspace">workspace</option>
+                  <option value="agent">agent</option>
+                  <option value="conversation">conversation</option>
+                </select>
+              </label>
+              <label>
+                Importance
+                <input bind:value={memoryImportance} min="1" max="100" type="number" />
+              </label>
               <label class="inline-check">
                 <input bind:checked={memoryPinned} type="checkbox" />
                 {strings.memories.pin}
               </label>
-              <button type="submit">{strings.memories.add}</button>
+              <label class="inline-check">
+                <input bind:checked={memoryActive} type="checkbox" />
+                Active
+              </label>
+              <button type="submit">{editingMemoryId ? 'Save memory' : strings.memories.add}</button>
             </form>
             <section class="panel">
               <div class="panel-heading">
@@ -1689,10 +1744,15 @@
                     <article>
                       <div>
                         <strong>{memory.title}</strong>
-                        <span>{memory.scope} / {memory.pinned ? 'pinned' : 'unpinned'} / used {memory.use_count}</span>
+                        <span>
+                          {memory.scope} / importance {memory.importance} / {memory.pinned ? 'pinned' : 'unpinned'} /
+                          {memory.active ? 'active' : 'disabled'} / used {memory.use_count}
+                        </span>
+                        <span>source {memory.source}</span>
                         <span>{memory.tags.join(', ')}</span>
                       </div>
                       <div>
+                        <button on:click={() => editMemory(memory)} type="button">Edit</button>
                         <button on:click={() => deleteMemory(memory.id)} type="button">{strings.memories.delete}</button>
                       </div>
                     </article>
