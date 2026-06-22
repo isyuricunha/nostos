@@ -40,7 +40,12 @@ export const strings = {
     noMessages: 'No messages yet.',
     noConversations: 'No conversations yet.',
     memoriesUsed: 'Memories used in this response',
-    remember: 'Remember'
+    remember: 'Remember',
+    feedbackUp: 'Thumbs up',
+    feedbackDown: 'Thumbs down',
+    clearFeedback: 'Clear feedback',
+    regenerate: 'Regenerate',
+    draftReply: 'Draft reply'
   },
   providers: {
     title: 'Providers',
@@ -75,5 +80,13 @@ export const strings = {
     discover: 'Discover tools',
     noServers: 'No MCP servers configured yet.',
     noTools: 'No tools discovered yet.'
+  },
+  replies: {
+    title: 'Reply drafts',
+    generate: 'Generate draft',
+    insert: 'Insert draft',
+    presets: 'Reply presets',
+    addPreset: 'Add preset',
+    resetDefaults: 'Reset defaults'
   }
 } as const;

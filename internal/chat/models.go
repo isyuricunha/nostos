@@ -112,9 +112,10 @@ type MemorySnippet struct {
 }
 
 type RunInput struct {
-	Content    string `json:"content"`
-	ProviderID string `json:"provider_id,omitempty"`
-	Model      string `json:"model,omitempty"`
+	Content                 string `json:"content"`
+	ProviderID              string `json:"provider_id,omitempty"`
+	Model                   string `json:"model,omitempty"`
+	RegenerationInstruction string `json:"regeneration_instruction,omitempty"`
 }
 
 type UpdateConversationInput struct {

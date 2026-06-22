@@ -278,6 +278,9 @@ func (s *Service) Regenerate(ctx context.Context, principal PrincipalContext, as
 		return err
 	}
 	input.Content = userMessage.Content
+	if instruction := strings.TrimSpace(input.RegenerationInstruction); instruction != "" {
+		input.Content += "\n\nRegeneration instruction:\n" + instruction
+	}
 	return s.runOnBranch(ctx, principal, run.ConversationID, branch.ID, input, sink)
 }
 

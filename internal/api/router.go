@@ -19,10 +19,12 @@ import (
 	"github.com/yuricunha/nostos/internal/agents"
 	"github.com/yuricunha/nostos/internal/chat"
 	"github.com/yuricunha/nostos/internal/config"
+	"github.com/yuricunha/nostos/internal/feedback"
 	"github.com/yuricunha/nostos/internal/health"
 	"github.com/yuricunha/nostos/internal/mcp"
 	"github.com/yuricunha/nostos/internal/memory"
 	"github.com/yuricunha/nostos/internal/providers"
+	"github.com/yuricunha/nostos/internal/replies"
 	"github.com/yuricunha/nostos/internal/tasks"
 )
 
@@ -37,6 +39,8 @@ type RouterDeps struct {
 	Memories  *memory.Service
 	MCP       *mcp.Service
 	Tasks     *tasks.Service
+	Feedback  *feedback.Service
+	Replies   *replies.Service
 }
 
 type APIError struct {
@@ -76,7 +80,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 		if deps.Auth.Auth != nil {
 			newAuthHandler(deps.Auth).Routes(r)
 		}
-		if deps.Auth.Auth != nil && (deps.Providers != nil || deps.Chat != nil || deps.Agents != nil || deps.Memories != nil || deps.MCP != nil || deps.Tasks != nil) {
+		if deps.Auth.Auth != nil && (deps.Providers != nil || deps.Chat != nil || deps.Agents != nil || deps.Memories != nil || deps.MCP != nil || deps.Tasks != nil || deps.Feedback != nil || deps.Replies != nil) {
 			r.Group(func(r chi.Router) {
 				authHandler := newAuthHandler(deps.Auth)
 				r.Use(authHandler.requireAuth)
@@ -98,6 +102,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 				}
 				if deps.Tasks != nil {
 					newTasksHandler(deps.Tasks).Routes(r)
+				}
+				if deps.Feedback != nil {
+					newFeedbackHandler(deps.Feedback).Routes(r)
+				}
+				if deps.Replies != nil {
+					newRepliesHandler(deps.Replies).Routes(r)
 				}
 			})
 		}

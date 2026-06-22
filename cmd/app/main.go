@@ -17,11 +17,13 @@ import (
 	"github.com/yuricunha/nostos/internal/chat"
 	"github.com/yuricunha/nostos/internal/config"
 	"github.com/yuricunha/nostos/internal/database"
+	"github.com/yuricunha/nostos/internal/feedback"
 	"github.com/yuricunha/nostos/internal/health"
 	"github.com/yuricunha/nostos/internal/logging"
 	"github.com/yuricunha/nostos/internal/mcp"
 	"github.com/yuricunha/nostos/internal/memory"
 	"github.com/yuricunha/nostos/internal/providers"
+	"github.com/yuricunha/nostos/internal/replies"
 	"github.com/yuricunha/nostos/internal/tasks"
 	"github.com/yuricunha/nostos/internal/worker"
 )
@@ -95,6 +97,11 @@ func run(args []string) error {
 	if err := taskService.EnsureSystemTasks(ctx); err != nil {
 		return err
 	}
+	feedbackService := feedback.NewService(feedback.NewSQLRepository(store))
+	replyService := replies.NewService(cfg, replies.NewSQLRepository(store), providerService, providerClient)
+	if err := replyService.EnsureDefaultPresets(ctx); err != nil {
+		return err
+	}
 	chatRepo := chat.NewSQLRepository(store)
 	chatService := chat.NewService(cfg, chatRepo, providerService, providerClient, agentService, memoryService)
 	if err := chatService.CleanupInterruptedRuns(ctx); err != nil {
@@ -108,7 +115,7 @@ func run(args []string) error {
 	case "worker":
 		return runWorker(ctx, cfg, logger, store, taskService)
 	case "server":
-		return runServer(ctx, cfg, logger, store, authService, providerService, chatService, agentService, memoryService, mcpService, taskService)
+		return runServer(ctx, cfg, logger, store, authService, providerService, chatService, agentService, memoryService, mcpService, taskService, feedbackService, replyService)
 	default:
 		return nil
 	}
@@ -126,6 +133,8 @@ func runServer(
 	memoryService *memory.Service,
 	mcpService *mcp.Service,
 	taskService *tasks.Service,
+	feedbackService *feedback.Service,
+	replyService *replies.Service,
 ) error {
 	healthService := health.NewService(store, version, buildCommit, buildTimestamp)
 	handler := api.NewRouter(api.RouterDeps{
@@ -142,6 +151,8 @@ func runServer(
 		Memories:  memoryService,
 		MCP:       mcpService,
 		Tasks:     taskService,
+		Feedback:  feedbackService,
+		Replies:   replyService,
 	})
 
 	server := &http.Server{

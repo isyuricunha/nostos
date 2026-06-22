@@ -165,6 +165,42 @@
     created_at: string;
   };
 
+  type MessageFeedback = {
+    id: string;
+    message_id: string;
+    rating: 'positive' | 'negative';
+    reason?: string;
+    comment?: string;
+  };
+
+  type FeedbackStats = {
+    positive: number;
+    negative: number;
+  };
+
+  type ReplyPreset = {
+    id: string;
+    name: string;
+    description: string;
+    prompt_instruction: string;
+    icon: string;
+    sort_order: number;
+    active: boolean;
+    system_default: boolean;
+  };
+
+  type ReplyDraft = {
+    id: string;
+    source_message_id: string;
+    preset_id?: string;
+    preset_name: string;
+    custom_instruction: string;
+    generated_draft: string;
+    provider_id?: string;
+    model?: string;
+    created_at: string;
+  };
+
   type ReadyStatus = {
     ready: boolean;
     version: string;
@@ -262,6 +298,30 @@
     events: TaskRunEvent[];
   };
 
+  type FeedbackResponse = {
+    feedback: MessageFeedback;
+  };
+
+  type FeedbackListResponse = {
+    feedback: MessageFeedback[];
+  };
+
+  type FeedbackStatsResponse = {
+    stats: FeedbackStats;
+  };
+
+  type ReplyPresetsResponse = {
+    presets: ReplyPreset[];
+  };
+
+  type ReplyPresetResponse = {
+    preset: ReplyPreset;
+  };
+
+  type ReplyDraftResponse = {
+    draft: ReplyDraft;
+  };
+
   const navItems = [
     strings.nav.chat,
     strings.nav.agents,
@@ -287,6 +347,13 @@
   let taskRecords: TaskRecord[] = [];
   let taskRuns: TaskRun[] = [];
   let taskRunEvents: TaskRunEvent[] = [];
+  let feedbackByMessage: Record<string, MessageFeedback> = {};
+  let feedbackStats: FeedbackStats = { positive: 0, negative: 0 };
+  let replyPresets: ReplyPreset[] = [];
+  let selectedReplySourceId = '';
+  let selectedReplyPresetId = '';
+  let replyCustomInstruction = '';
+  let replyDraft = '';
   let runMemories: MemorySnippet[] = [];
   let selectedConversationId = '';
   let selectedAgentId = '';
@@ -333,6 +400,10 @@
   let taskIntervalSeconds = 3600;
   let taskRunAt = '';
   let taskToolPolicy = 'use_preapproved_tools_only';
+  let negativeFeedbackReason = 'Incorrect information';
+  let replyPresetName = '';
+  let replyPresetInstruction = '';
+  let replyPresetDescription = '';
 
   onMount(async () => {
     await refreshAppState();
@@ -384,6 +455,8 @@
       refreshMemories(),
       refreshMCP(),
       refreshTasks(),
+      refreshReplyPresets(),
+      refreshFeedbackStats(),
       refreshConversations()
     ]);
   }
@@ -575,6 +648,7 @@
     selectedConversationId = conversationId;
     const response = await getJSON<MessagesResponse>(`/api/v1/conversations/${conversationId}/messages`);
     messages = response.messages;
+    await refreshFeedback(conversationId);
     const conversation = conversations.find((item) => item.id === conversationId);
     if (conversation) {
       selectedAgentId = conversation.agent_id || selectedAgentId;
@@ -858,6 +932,123 @@
     return taskRecords.find((record) => record.task.id === run.task_id)?.task.name ?? run.task_id;
   }
 
+  async function refreshFeedback(conversationId = selectedConversationId): Promise<void> {
+    if (!conversationId) {
+      feedbackByMessage = {};
+      return;
+    }
+    const response = await getJSON<FeedbackListResponse>(`/api/v1/feedback?conversation_id=${conversationId}`);
+    feedbackByMessage = Object.fromEntries(response.feedback.map((item) => [item.message_id, item]));
+  }
+
+  async function refreshFeedbackStats(): Promise<void> {
+    const response = await getJSON<FeedbackStatsResponse>('/api/v1/feedback/stats');
+    feedbackStats = response.stats;
+  }
+
+  async function submitFeedback(message: Message, rating: 'positive' | 'negative'): Promise<void> {
+    const response = await putJSON<FeedbackResponse>(`/api/v1/messages/${message.id}/feedback`, {
+      rating,
+      reason: rating === 'negative' ? negativeFeedbackReason : '',
+      comment: ''
+    });
+    feedbackByMessage = { ...feedbackByMessage, [message.id]: response.feedback };
+    await refreshFeedbackStats();
+    notice = rating === 'positive' ? 'Positive feedback saved.' : 'Negative feedback saved.';
+  }
+
+  async function clearFeedback(messageId: string): Promise<void> {
+    await deleteJSON<{ ok: boolean }>(`/api/v1/messages/${messageId}/feedback`);
+    const next = { ...feedbackByMessage };
+    delete next[messageId];
+    feedbackByMessage = next;
+    await refreshFeedbackStats();
+    notice = 'Feedback removed.';
+  }
+
+  async function regenerateWithFeedback(message: Message): Promise<void> {
+    const feedback = feedbackByMessage[message.id];
+    const instruction =
+      feedback?.rating === 'negative'
+        ? `Address this feedback reason: ${feedback.reason || negativeFeedbackReason}. Preserve the original user intent and produce a better answer.`
+        : 'Regenerate the response with a clearer and more useful answer.';
+    await postStream(
+      `/api/v1/messages/${message.id}/regenerate`,
+      { provider_id: selectedProviderId, model: selectedModel, regeneration_instruction: instruction },
+      handleChatEvent
+    );
+    await Promise.all([selectConversation(selectedConversationId), refreshConversations()]);
+  }
+
+  async function refreshReplyPresets(): Promise<void> {
+    const response = await getJSON<ReplyPresetsResponse>('/api/v1/reply-presets');
+    replyPresets = response.presets;
+    if (!selectedReplyPresetId) {
+      selectedReplyPresetId = response.presets.find((preset) => preset.active)?.id ?? '';
+    }
+  }
+
+  async function createReplyPreset(): Promise<void> {
+    const response = await postJSON<ReplyPresetResponse>('/api/v1/reply-presets', {
+      name: replyPresetName,
+      description: replyPresetDescription,
+      prompt_instruction: replyPresetInstruction,
+      icon: 'message-circle',
+      sort_order: replyPresets.length + 1,
+      active: true
+    });
+    replyPresets = [...replyPresets, response.preset];
+    replyPresetName = '';
+    replyPresetDescription = '';
+    replyPresetInstruction = '';
+    notice = 'Reply preset saved.';
+  }
+
+  async function toggleReplyPreset(preset: ReplyPreset): Promise<void> {
+    const response = await putJSON<ReplyPresetResponse>(`/api/v1/reply-presets/${preset.id}`, {
+      name: preset.name,
+      description: preset.description,
+      prompt_instruction: preset.prompt_instruction,
+      icon: preset.icon,
+      sort_order: preset.sort_order,
+      active: !preset.active
+    });
+    replyPresets = replyPresets.map((item) => (item.id === preset.id ? response.preset : item));
+  }
+
+  async function resetReplyPresets(): Promise<void> {
+    await postJSON<{ ok: boolean }>('/api/v1/reply-presets/reset');
+    await refreshReplyPresets();
+    notice = 'Default reply presets are available.';
+  }
+
+  function selectReplySource(message: Message): void {
+    selectedReplySourceId = message.id;
+    replyDraft = '';
+  }
+
+  async function generateReplyDraft(): Promise<void> {
+    if (!selectedReplySourceId || !selectedReplyPresetId) {
+      errorMessage = 'Select a source message and reply preset.';
+      return;
+    }
+    const response = await postJSON<ReplyDraftResponse>('/api/v1/reply-drafts', {
+      source_message_id: selectedReplySourceId,
+      preset_id: selectedReplyPresetId,
+      custom_instruction: replyCustomInstruction,
+      provider_id: selectedProviderId,
+      model: selectedModel
+    });
+    replyDraft = response.draft.generated_draft;
+    notice = 'Reply draft generated.';
+  }
+
+  function insertReplyDraft(): void {
+    composer = replyDraft;
+    replyDraft = '';
+    selectedReplySourceId = '';
+  }
+
   function messageFromError(error: unknown): string {
     return error instanceof Error ? error.message : 'The request failed.';
   }
@@ -1031,6 +1222,64 @@
             <p>Diagnostics have not been loaded.</p>
           {/if}
         </section>
+
+        <section class="panel" aria-labelledby="feedback-stats-title">
+          <div class="panel-heading">
+            <h2 id="feedback-stats-title">Feedback statistics</h2>
+            <button on:click={refreshFeedbackStats} type="button">Refresh</button>
+          </div>
+          <dl class="status-grid">
+            <div>
+              <dt>Positive</dt>
+              <dd>{feedbackStats.positive}</dd>
+            </div>
+            <div>
+              <dt>Negative</dt>
+              <dd>{feedbackStats.negative}</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="providers-layout">
+          <form class="panel" on:submit|preventDefault={createReplyPreset}>
+            <h2>{strings.replies.addPreset}</h2>
+            <label>
+              Name
+              <input bind:value={replyPresetName} required />
+            </label>
+            <label>
+              Description
+              <input bind:value={replyPresetDescription} />
+            </label>
+            <label>
+              Prompt instruction
+              <textarea bind:value={replyPresetInstruction} required></textarea>
+            </label>
+            <button type="submit">{strings.replies.addPreset}</button>
+          </form>
+          <section class="panel" aria-labelledby="reply-presets-title">
+            <div class="panel-heading">
+              <h2 id="reply-presets-title">{strings.replies.presets}</h2>
+              <button on:click={resetReplyPresets} type="button">{strings.replies.resetDefaults}</button>
+            </div>
+            <div class="table-list">
+              {#each replyPresets as preset (preset.id)}
+                <article>
+                  <div>
+                    <strong>{preset.name}</strong>
+                    <span>{preset.description}</span>
+                    <span>{preset.active ? 'active' : 'disabled'}{preset.system_default ? ' / default' : ''}</span>
+                  </div>
+                  <div>
+                    <button on:click={() => toggleReplyPreset(preset)} type="button">
+                      {preset.active ? 'Disable' : 'Enable'}
+                    </button>
+                  </div>
+                </article>
+              {/each}
+            </div>
+          </section>
+        </section>
       {:else}
         {#if activeView === strings.nav.chat}
           <section class="workbench" aria-label="Chat workspace">
@@ -1094,12 +1343,77 @@
                         <small>{message.total_tokens} tokens</small>
                       {/if}
                       {#if message.content}
-                        <button on:click={() => rememberMessage(message)} type="button">{strings.chat.remember}</button>
+                        <div class="message-actions">
+                          <button on:click={() => rememberMessage(message)} type="button">{strings.chat.remember}</button>
+                          <button on:click={() => selectReplySource(message)} type="button">{strings.chat.draftReply}</button>
+                          {#if message.role === 'assistant'}
+                            <button
+                              class:active={feedbackByMessage[message.id]?.rating === 'positive'}
+                              on:click={() => submitFeedback(message, 'positive')}
+                              type="button"
+                            >
+                              {strings.chat.feedbackUp}
+                            </button>
+                            <select
+                              aria-label="Negative feedback reason"
+                              bind:value={negativeFeedbackReason}
+                            >
+                              <option value="Incorrect information">Incorrect information</option>
+                              <option value="Too long">Too long</option>
+                              <option value="Too technical">Too technical</option>
+                              <option value="Did not follow instructions">Did not follow instructions</option>
+                              <option value="Inappropriate tone">Inappropriate tone</option>
+                              <option value="Invented information">Invented information</option>
+                              <option value="Ignored memories">Ignored memories</option>
+                              <option value="Other">Other</option>
+                            </select>
+                            <button
+                              class:active={feedbackByMessage[message.id]?.rating === 'negative'}
+                              on:click={() => submitFeedback(message, 'negative')}
+                              type="button"
+                            >
+                              {strings.chat.feedbackDown}
+                            </button>
+                            {#if feedbackByMessage[message.id]}
+                              <button on:click={() => clearFeedback(message.id)} type="button">{strings.chat.clearFeedback}</button>
+                              <button on:click={() => regenerateWithFeedback(message)} type="button">{strings.chat.regenerate}</button>
+                            {/if}
+                          {/if}
+                        </div>
                       {/if}
                     </article>
                   {/each}
                 {/if}
               </div>
+              {#if selectedReplySourceId}
+                <section class="reply-panel" aria-labelledby="reply-draft-title">
+                  <div class="panel-heading">
+                    <h2 id="reply-draft-title">{strings.replies.title}</h2>
+                    <button on:click={() => (selectedReplySourceId = '')} type="button">Close</button>
+                  </div>
+                  <label>
+                    Preset
+                    <select bind:value={selectedReplyPresetId}>
+                      {#each replyPresets.filter((preset) => preset.active) as preset (preset.id)}
+                        <option value={preset.id}>{preset.name}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label>
+                    Custom instruction
+                    <textarea bind:value={replyCustomInstruction} placeholder="Optional direction for this draft"></textarea>
+                  </label>
+                  <div class="message-actions">
+                    <button on:click={generateReplyDraft} type="button">{strings.replies.generate}</button>
+                    {#if replyDraft}
+                      <button on:click={insertReplyDraft} type="button">{strings.replies.insert}</button>
+                    {/if}
+                  </div>
+                  {#if replyDraft}
+                    <textarea bind:value={replyDraft} aria-label="Generated reply draft"></textarea>
+                  {/if}
+                </section>
+              {/if}
               {#if runMemories.length > 0}
                 <details class="memory-panel" open>
                   <summary>{strings.chat.memoriesUsed}</summary>
