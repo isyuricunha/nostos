@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nostos}
+      POSTGRES_USER: ${POSTGRES_USER:-nostos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - nostos-postgres:/var/lib/postgresql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nostos} -d ${POSTGRES_DB:-nostos}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  app:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_DRIVER: postgres
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nostos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nostos}
+
+  worker:
+    depends_on:
+      postgres:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    environment:
+      DATABASE_DRIVER: postgres
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nostos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nostos}
+
+volumes:
+  nostos-postgres:

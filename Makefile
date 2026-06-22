@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: dev dev-web dev-server dev-worker build test test-go test-web test-integration lint format migrate docker-build docker-up docker-down doctor
+.PHONY: dev dev-web dev-server dev-worker build test test-go test-web test-integration lint format migrate docker-build docker-up docker-up-local-db docker-up-sqlite docker-down doctor
 
 dev:
 	$(MAKE) -j2 dev-server dev-web
@@ -45,10 +45,16 @@ docker-build:
 	docker build -t nostos:latest .
 
 docker-up:
+	docker compose -f compose.yaml up -d
+
+docker-up-local-db:
 	docker compose -f compose.yaml -f compose.local-db.yaml up -d
 
+docker-up-sqlite:
+	docker compose -f compose.yaml -f compose.sqlite.yaml up -d
+
 docker-down:
-	docker compose -f compose.yaml -f compose.local-db.yaml down
+	docker compose -f compose.yaml -f compose.local-db.yaml -f compose.sqlite.yaml down
 
 doctor:
 	go run ./cmd/app doctor

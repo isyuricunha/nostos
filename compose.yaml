@@ -1,0 +1,58 @@
+services:
+  app:
+    image: nostos:latest
+    command: ["server"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 7000
+      DATA_DIR: /data
+      MIGRATIONS_DIR: /migrations
+      WEB_DIST_DIR: /web/dist
+    ports:
+      - "${APP_PORT:-7000}:7000"
+    volumes:
+      - nostos-data:/data
+    healthcheck:
+      test: [ "CMD", "/nostos", "doctor" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  worker:
+    image: nostos:latest
+    command: ["worker"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /data
+      MIGRATIONS_DIR: /migrations
+      WEB_DIST_DIR: /web/dist
+    volumes:
+      - nostos-data:/data
+    depends_on:
+      app:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  nostos-data:

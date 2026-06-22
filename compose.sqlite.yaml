@@ -1,0 +1,11 @@
+services:
+  app:
+    environment:
+      DATABASE_DRIVER: sqlite
+      DATABASE_URL: /data/nostos.db
+
+  worker:
+    environment:
+      DATABASE_DRIVER: sqlite
+      DATABASE_URL: /data/nostos.db
+      WORKER_CONCURRENCY: 1
