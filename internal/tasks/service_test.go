@@ -274,6 +274,73 @@ func TestScheduleEnqueueAndLeaseRecovery(t *testing.T) {
 	}
 }
 
+func TestScheduleOccurrenceClaimHasSingleWinner(t *testing.T) {
+	ctx := context.Background()
+	cfg, store, user, cleanup := newTaskTestContext(t)
+	defer cleanup()
+	service := NewService(cfg, NewSQLRepository(store), auth.NewSQLRepository(store))
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	task, _, err := service.CreateTask(ctx, principal, TaskInput{
+		Name:              "Single winner schedule",
+		TaskType:          TaskTypeSystem,
+		State:             TaskEnabled,
+		Prompt:            "cleanup_expired_sessions",
+		ScheduleMode:      "interval",
+		IntervalSeconds:   3600,
+		ToolPolicy:        "use_preapproved_tools_only",
+		ConcurrencyPolicy: "allow",
+	})
+	if err != nil {
+		t.Fatalf("create scheduled task: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Minute)
+	if _, err := store.DB.ExecContext(ctx, "UPDATE task_schedules SET next_run_at = "+store.Placeholder(1)+" WHERE task_id = "+store.Placeholder(2), store.NowArg(past), task.ID); err != nil {
+		t.Fatalf("force due schedule: %v", err)
+	}
+	repo := NewSQLRepository(store)
+	schedule, err := repo.GetSchedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	if schedule.NextRunAt == nil {
+		t.Fatal("expected due schedule")
+	}
+	occurrence := *schedule.NextRunAt
+	schedule.LastEnqueuedOccurrence = occurrence.UTC().Format(time.RFC3339)
+	schedule.NextRunAt = nextRun(schedule, time.Now().UTC(), cfg.Timezone)
+
+	var wg sync.WaitGroup
+	results := make(chan bool, 2)
+	errorsCh := make(chan error, 2)
+	for index := 0; index < 2; index++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claimed, err := repo.ClaimScheduleOccurrence(ctx, schedule, occurrence)
+			if err != nil {
+				errorsCh <- err
+				return
+			}
+			results <- claimed
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errorsCh)
+	for err := range errorsCh {
+		t.Fatalf("claim schedule occurrence: %v", err)
+	}
+	winners := 0
+	for claimed := range results {
+		if claimed {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("expected exactly one schedule claim winner, got %d", winners)
+	}
+}
+
 func TestConcurrentClaimsExecuteRunsInParallel(t *testing.T) {
 	ctx := context.Background()
 	var mu sync.Mutex

@@ -22,7 +22,7 @@ type Repository interface {
 	DeleteTask(ctx context.Context, workspaceID string, taskID string) error
 	GetSchedule(ctx context.Context, taskID string) (Schedule, error)
 	DueSchedules(ctx context.Context, now time.Time) ([]Schedule, error)
-	MarkScheduleEnqueued(ctx context.Context, schedule Schedule) error
+	ClaimScheduleOccurrence(ctx context.Context, schedule Schedule, occurrence time.Time) (bool, error)
 	EnqueueRun(ctx context.Context, run Run) (Run, error)
 	ClaimRun(ctx context.Context, workerID string, leaseUntil time.Time) (Run, error)
 	RenewLease(ctx context.Context, runID string, workerID string, leaseUntil time.Time) error
@@ -193,11 +193,32 @@ func (r *SQLRepository) DueSchedules(ctx context.Context, now time.Time) ([]Sche
 	return schedules, rows.Err()
 }
 
-func (r *SQLRepository) MarkScheduleEnqueued(ctx context.Context, schedule Schedule) error {
+func (r *SQLRepository) ClaimScheduleOccurrence(ctx context.Context, schedule Schedule, occurrence time.Time) (bool, error) {
+	if occurrence.IsZero() || schedule.LastEnqueuedOccurrence == "" {
+		return false, nil
+	}
 	query := `UPDATE task_schedules SET last_enqueued_occurrence = ` + r.store.Placeholder(1) + `, next_run_at = ` + r.store.Placeholder(2) +
-		`, enabled = ` + r.store.Placeholder(3) + `, updated_at = ` + r.store.Placeholder(4) + ` WHERE id = ` + r.store.Placeholder(5)
-	_, err := r.store.DB.ExecContext(ctx, query, schedule.LastEnqueuedOccurrence, timePtrArg(r.store, schedule.NextRunAt), schedule.Enabled, r.store.NowArg(time.Now().UTC()), schedule.ID)
-	return err
+		`, enabled = ` + r.store.Placeholder(3) + `, updated_at = ` + r.store.Placeholder(4) + ` WHERE id = ` + r.store.Placeholder(5) +
+		` AND enabled = ` + r.store.Placeholder(6) + ` AND next_run_at = ` + r.store.Placeholder(7) +
+		` AND (last_enqueued_occurrence IS NULL OR last_enqueued_occurrence <> ` + r.store.Placeholder(8) + `)`
+	result, err := r.store.DB.ExecContext(ctx, query,
+		schedule.LastEnqueuedOccurrence,
+		timePtrArg(r.store, schedule.NextRunAt),
+		schedule.Enabled,
+		r.store.NowArg(time.Now().UTC()),
+		schedule.ID,
+		true,
+		r.store.NowArg(occurrence),
+		schedule.LastEnqueuedOccurrence,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 func (r *SQLRepository) EnqueueRun(ctx context.Context, run Run) (Run, error) {

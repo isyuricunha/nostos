@@ -305,7 +305,6 @@ func (s *Service) EnqueueDueSchedules(ctx context.Context) error {
 			continue
 		}
 		key := "schedule:" + schedule.ID + ":" + occurrence.UTC().Format(time.RFC3339)
-		_, _ = s.enqueueTask(ctx, task, schedule.ID, key, 0)
 		next := nextRun(schedule, now, s.cfg.Timezone)
 		schedule.LastEnqueuedOccurrence = occurrence.UTC().Format(time.RFC3339)
 		schedule.NextRunAt = next
@@ -313,7 +312,16 @@ func (s *Service) EnqueueDueSchedules(ctx context.Context) error {
 			schedule.Enabled = false
 			schedule.NextRunAt = nil
 		}
-		_ = s.repo.MarkScheduleEnqueued(ctx, schedule)
+		claimed, err := s.repo.ClaimScheduleOccurrence(ctx, schedule, *occurrence)
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			continue
+		}
+		if _, err := s.enqueueTask(ctx, task, schedule.ID, key, 0); err != nil && !errors.Is(err, ErrInvalidInput) {
+			return err
+		}
 	}
 	return nil
 }
