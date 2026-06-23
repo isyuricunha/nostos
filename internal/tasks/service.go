@@ -271,7 +271,17 @@ func (s *Service) GetRunRecord(ctx context.Context, principal PrincipalContext, 
 	if err != nil {
 		return RunRecord{}, err
 	}
-	return RunRecord{Run: run, Events: events}, nil
+	if events == nil {
+		events = []Event{}
+	}
+	toolCalls, err := s.repo.ListTaskToolCalls(ctx, run.ID)
+	if err != nil {
+		return RunRecord{}, err
+	}
+	if toolCalls == nil {
+		toolCalls = []TaskToolCall{}
+	}
+	return RunRecord{Run: run, Events: events, ToolCalls: toolCalls}, nil
 }
 
 func (s *Service) RetryRun(ctx context.Context, principal PrincipalContext, runID string) (Run, error) {
@@ -733,10 +743,50 @@ func (s *Service) executeTaskModelLoop(
 		for _, call := range toolCalls {
 			tool, ok := toolByName[call.Function.Name]
 			if !ok {
+				_, _ = s.repo.CreateTaskToolCall(ctx, TaskToolCall{
+					TaskRunID:          run.ID,
+					ProviderToolCallID: call.ID,
+					ToolName:           call.Function.Name,
+					Arguments:          call.Function.Arguments,
+					PermissionDecision: "unavailable",
+					State:              "failed",
+					ErrorCategory:      "tool_unavailable",
+					ErrorMessage:       sanitizeTaskToolError(fmt.Sprintf("tool %q is not available to this task", call.Function.Name)),
+				})
 				return "", fmt.Errorf("task requested unavailable tool %q", call.Function.Name)
 			}
+			permissionDecision := "allow"
 			if tool.PermissionMode != chat.ToolPermissionAllow {
+				_, _ = s.repo.CreateTaskToolCall(ctx, TaskToolCall{
+					TaskRunID:          run.ID,
+					MCPServerID:        tool.ServerID,
+					MCPToolID:          tool.ID,
+					ProviderToolCallID: call.ID,
+					ToolName:           tool.Name,
+					Arguments:          call.Function.Arguments,
+					PermissionDecision: "approval_required",
+					State:              "failed",
+					ErrorCategory:      "approval_required",
+					ErrorMessage:       "Task stopped because tool approval would be required.",
+				})
 				return "", errors.New("task stopped because tool approval would be required")
+			}
+			record, err := s.repo.CreateTaskToolCall(ctx, TaskToolCall{
+				TaskRunID:          run.ID,
+				MCPServerID:        tool.ServerID,
+				MCPToolID:          tool.ID,
+				ProviderToolCallID: call.ID,
+				ToolName:           tool.Name,
+				Arguments:          call.Function.Arguments,
+				PermissionDecision: permissionDecision,
+				State:              "pending",
+			})
+			if err != nil {
+				return "", err
+			}
+			startedAt := time.Now().UTC()
+			if err := s.repo.StartTaskToolCall(ctx, record.ID, startedAt); err != nil {
+				return "", err
 			}
 			_ = s.repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "info", Message: "Executing tool " + tool.Name + "."})
 			result, err := s.tools.ExecuteRuntimeTool(ctx, chat.ToolExecutionRequest{
@@ -749,12 +799,23 @@ func (s *Service) executeTaskModelLoop(
 				ToolDisplayName: tool.Name,
 			})
 			if err != nil {
+				state := "failed"
+				category := "tool_execution_failed"
+				if errors.Is(err, context.DeadlineExceeded) {
+					state = "timed_out"
+					category = "tool_timeout"
+				}
+				_ = s.repo.CompleteTaskToolCall(ctx, record.ID, state, "", false, category, sanitizeTaskToolError(err.Error()), time.Now().UTC())
 				return "", err
 			}
-			if result.Truncated {
+			resultText, truncated := boundedTaskToolResult(result.Content, result.Truncated, 32*1024)
+			if truncated {
 				_ = s.repo.AppendEvent(ctx, Event{RunID: run.ID, Level: "warn", Message: "Tool result was truncated."})
 			}
-			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: call.ID, Content: result.Content})
+			if err := s.repo.CompleteTaskToolCall(ctx, record.ID, "succeeded", resultText, truncated, "", "", time.Now().UTC()); err != nil {
+				return "", err
+			}
+			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: call.ID, Content: resultText})
 		}
 	}
 	text := strings.TrimSpace(final.String())
@@ -826,6 +887,24 @@ func consumeTaskStream(events <-chan providers.StreamEvent) (string, []providers
 		}
 	}
 	return content.String(), calls, nil
+}
+
+func boundedTaskToolResult(content string, alreadyTruncated bool, maxBytes int) (string, bool) {
+	if maxBytes <= 0 {
+		maxBytes = 32 * 1024
+	}
+	if len(content) <= maxBytes {
+		return content, alreadyTruncated
+	}
+	return content[:maxBytes] + "\n[truncated]", true
+}
+
+func sanitizeTaskToolError(message string) string {
+	message = strings.TrimSpace(message)
+	if len(message) > 500 {
+		message = message[:500]
+	}
+	return message
 }
 
 func mergeTaskToolCall(calls []providers.ToolCall, next providers.ToolCall) []providers.ToolCall {

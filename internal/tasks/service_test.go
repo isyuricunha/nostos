@@ -211,6 +211,14 @@ func TestAgentTaskUsesAgentMemoriesAndAllowedTool(t *testing.T) {
 	if !taskEventsContain(record.Events, "Task injected 1 explicit memories.") || !taskEventsContain(record.Events, "Executing tool lookup_status.") {
 		t.Fatalf("expected memory and tool events, got %#v", record.Events)
 	}
+	if len(record.ToolCalls) != 1 {
+		t.Fatalf("expected one structured task tool call, got %#v", record.ToolCalls)
+	}
+	call := record.ToolCalls[0]
+	if call.TaskRunID != runs[0].ID || call.ToolName != "lookup_status" || call.ProviderToolCallID != "task_call_1" ||
+		call.PermissionDecision != "allow" || call.State != "succeeded" || call.Result != "api is healthy" || call.MCPToolID != "task_tool_1" {
+		t.Fatalf("unexpected structured task tool call: %#v", call)
+	}
 }
 
 func TestScheduleEnqueueAndLeaseRecovery(t *testing.T) {

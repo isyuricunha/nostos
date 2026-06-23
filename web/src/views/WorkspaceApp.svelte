@@ -57,6 +57,7 @@
     TaskRunRecordResponse,
     TaskRunResponse,
     TaskRunsResponse,
+    TaskToolCall,
     TasksResponse,
     ToolApprovalsResponse,
     ToolCall,
@@ -92,6 +93,7 @@
   let taskRecords: TaskRecord[] = [];
   let taskRuns: TaskRun[] = [];
   let taskRunEvents: TaskRunEvent[] = [];
+  let taskRunToolCalls: TaskToolCall[] = [];
   let feedbackByMessage: Record<string, MessageFeedback> = {};
   let feedbackStats: FeedbackStats = { positive: 0, negative: 0 };
   let replyPresets: ReplyPreset[] = [];
@@ -1041,6 +1043,7 @@
   async function showTaskRunEvents(runId: string): Promise<void> {
     const response = await getJSON<TaskRunRecordResponse>(`/api/v1/task-runs/${runId}`);
     taskRunEvents = response.events ?? [];
+    taskRunToolCalls = response.tool_calls ?? [];
   }
 
   function taskNameForRun(run: TaskRun): string {
@@ -1342,6 +1345,7 @@
             {taskRecords}
             bind:taskRunAt
             {taskRunEvents}
+            {taskRunToolCalls}
             taskNameForRun={taskNameForRun}
             {taskRuns}
             bind:taskScheduleMode

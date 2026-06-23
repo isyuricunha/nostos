@@ -83,8 +83,9 @@ type TaskRecord struct {
 }
 
 type RunRecord struct {
-	Run    Run     `json:"run"`
-	Events []Event `json:"events"`
+	Run       Run            `json:"run"`
+	Events    []Event        `json:"events"`
+	ToolCalls []TaskToolCall `json:"tool_calls"`
 }
 
 type Event struct {
@@ -93,6 +94,27 @@ type Event struct {
 	Level     string    `json:"level"`
 	Message   string    `json:"message"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type TaskToolCall struct {
+	ID                 string     `json:"id"`
+	TaskRunID          string     `json:"task_run_id"`
+	MCPServerID        string     `json:"mcp_server_id,omitempty"`
+	MCPToolID          string     `json:"mcp_tool_id,omitempty"`
+	ProviderToolCallID string     `json:"provider_tool_call_id,omitempty"`
+	ToolName           string     `json:"tool_name"`
+	Arguments          string     `json:"arguments"`
+	PermissionDecision string     `json:"permission_decision"`
+	State              string     `json:"state"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	DurationMS         int        `json:"duration_ms,omitempty"`
+	Result             string     `json:"result,omitempty"`
+	ResultTruncated    bool       `json:"result_truncated"`
+	ErrorCategory      string     `json:"error_category,omitempty"`
+	ErrorMessage       string     `json:"error_message,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type TaskInput struct {

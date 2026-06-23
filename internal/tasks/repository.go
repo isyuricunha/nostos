@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ type Repository interface {
 	ListRuns(ctx context.Context, workspaceID string, taskID string) ([]Run, error)
 	ListEvents(ctx context.Context, runID string) ([]Event, error)
 	AppendEvent(ctx context.Context, event Event) error
+	CreateTaskToolCall(ctx context.Context, call TaskToolCall) (TaskToolCall, error)
+	StartTaskToolCall(ctx context.Context, callID string, startedAt time.Time) error
+	CompleteTaskToolCall(ctx context.Context, callID string, state string, result string, truncated bool, errorCategory string, errorMessage string, completedAt time.Time) error
+	ListTaskToolCalls(ctx context.Context, runID string) ([]TaskToolCall, error)
 	RecoverExpiredLeases(ctx context.Context, now time.Time) (int64, error)
 	CleanupExpiredSessions(ctx context.Context, now time.Time) (int64, error)
 	PruneOldTaskRunEvents(ctx context.Context, cutoff time.Time) (int64, error)
@@ -382,6 +387,81 @@ func (r *SQLRepository) AppendEvent(ctx context.Context, event Event) error {
 	return err
 }
 
+func (r *SQLRepository) CreateTaskToolCall(ctx context.Context, call TaskToolCall) (TaskToolCall, error) {
+	now := time.Now().UTC()
+	call.ID = id.New()
+	call.CreatedAt = now
+	call.UpdatedAt = now
+	if strings.TrimSpace(call.State) == "" {
+		call.State = "pending"
+	}
+	if strings.TrimSpace(call.PermissionDecision) == "" {
+		call.PermissionDecision = "not_required"
+	}
+	if strings.TrimSpace(call.Arguments) == "" || !json.Valid([]byte(call.Arguments)) {
+		call.Arguments = "{}"
+	}
+	query := `INSERT INTO task_tool_calls (id, task_run_id, mcp_server_id, mcp_tool_id, provider_tool_call_id, tool_name,
+arguments, permission_decision, state, started_at, completed_at, duration_ms, result, result_truncated, error_category,
+error_message, created_at, updated_at) VALUES (` + placeholders(r.store, 18) + `)`
+	_, err := r.store.DB.ExecContext(ctx, query,
+		call.ID, call.TaskRunID, nullableString(call.MCPServerID), nullableString(call.MCPToolID), nullableString(call.ProviderToolCallID),
+		call.ToolName, call.Arguments, call.PermissionDecision, call.State, timePtrArg(r.store, call.StartedAt), timePtrArg(r.store, call.CompletedAt),
+		nullInt(call.DurationMS), nullableString(call.Result), call.ResultTruncated, nullableString(call.ErrorCategory), nullableString(call.ErrorMessage),
+		r.store.NowArg(now), r.store.NowArg(now),
+	)
+	return call, err
+}
+
+func (r *SQLRepository) StartTaskToolCall(ctx context.Context, callID string, startedAt time.Time) error {
+	query := `UPDATE task_tool_calls SET state = ` + r.store.Placeholder(1) + `, started_at = ` + r.store.Placeholder(2) +
+		`, updated_at = ` + r.store.Placeholder(3) + ` WHERE id = ` + r.store.Placeholder(4)
+	_, err := r.store.DB.ExecContext(ctx, query, "running", r.store.NowArg(startedAt), r.store.NowArg(time.Now().UTC()), callID)
+	return err
+}
+
+func (r *SQLRepository) CompleteTaskToolCall(ctx context.Context, callID string, state string, resultText string, truncated bool, errorCategory string, errorMessage string, completedAt time.Time) error {
+	var startedRaw any
+	if err := r.store.DB.QueryRowContext(ctx, `SELECT started_at FROM task_tool_calls WHERE id = `+r.store.Placeholder(1), callID).Scan(&startedRaw); err != nil {
+		return err
+	}
+	startedAt, err := nullableTime(startedRaw)
+	if err != nil {
+		return err
+	}
+	durationMS := 0
+	if startedAt != nil {
+		durationMS = int(completedAt.Sub(*startedAt).Milliseconds())
+		if durationMS < 0 {
+			durationMS = 0
+		}
+	}
+	query := `UPDATE task_tool_calls SET state = ` + r.store.Placeholder(1) + `, completed_at = ` + r.store.Placeholder(2) +
+		`, duration_ms = ` + r.store.Placeholder(3) + `, result = ` + r.store.Placeholder(4) + `, result_truncated = ` + r.store.Placeholder(5) +
+		`, error_category = ` + r.store.Placeholder(6) + `, error_message = ` + r.store.Placeholder(7) +
+		`, updated_at = ` + r.store.Placeholder(8) + ` WHERE id = ` + r.store.Placeholder(9)
+	_, err = r.store.DB.ExecContext(ctx, query, state, r.store.NowArg(completedAt), nullInt(durationMS), nullableString(resultText), truncated,
+		nullableString(errorCategory), nullableString(errorMessage), r.store.NowArg(time.Now().UTC()), callID)
+	return err
+}
+
+func (r *SQLRepository) ListTaskToolCalls(ctx context.Context, runID string) ([]TaskToolCall, error) {
+	rows, err := r.store.DB.QueryContext(ctx, taskToolCallSelect(r.store)+` WHERE task_run_id = `+r.store.Placeholder(1)+` ORDER BY created_at`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var calls []TaskToolCall
+	for rows.Next() {
+		call, err := scanTaskToolCall(rows)
+		if err != nil {
+			return nil, err
+		}
+		calls = append(calls, call)
+	}
+	return calls, rows.Err()
+}
+
 func (r *SQLRepository) RecoverExpiredLeases(ctx context.Context, now time.Time) (int64, error) {
 	query := `UPDATE task_runs SET state = ` + r.store.Placeholder(1) + `, lease_owner = NULL, lease_expires_at = NULL, updated_at = ` + r.store.Placeholder(2) +
 		` WHERE state IN (` + r.store.Placeholder(3) + `, ` + r.store.Placeholder(4) + `) AND lease_expires_at < ` + r.store.Placeholder(5)
@@ -499,6 +579,12 @@ func eventSelect(store *database.Store) string {
 	return `SELECT id, task_run_id, level, message, created_at FROM task_run_events`
 }
 
+func taskToolCallSelect(store *database.Store) string {
+	return `SELECT id, task_run_id, mcp_server_id, mcp_tool_id, provider_tool_call_id, tool_name, arguments,
+permission_decision, state, started_at, completed_at, duration_ms, result, result_truncated, error_category,
+error_message, created_at, updated_at FROM task_tool_calls`
+}
+
 func scanTask(row rowScanner) (Task, error) {
 	var task Task
 	var agentID, providerID, model, resultText, lastError sql.NullString
@@ -601,6 +687,40 @@ func scanEvent(row rowScanner) (Event, error) {
 	}
 	event.CreatedAt = createdAt
 	return event, nil
+}
+
+func scanTaskToolCall(row rowScanner) (TaskToolCall, error) {
+	var call TaskToolCall
+	var serverID, toolID, providerCallID, resultText, errorCategory, errorMessage sql.NullString
+	var duration sql.NullInt64
+	var startedRaw, completedRaw, createdRaw, updatedRaw any
+	if err := row.Scan(&call.ID, &call.TaskRunID, &serverID, &toolID, &providerCallID, &call.ToolName, &call.Arguments,
+		&call.PermissionDecision, &call.State, &startedRaw, &completedRaw, &duration, &resultText, &call.ResultTruncated,
+		&errorCategory, &errorMessage, &createdRaw, &updatedRaw); err != nil {
+		return TaskToolCall{}, err
+	}
+	call.MCPServerID = serverID.String
+	call.MCPToolID = toolID.String
+	call.ProviderToolCallID = providerCallID.String
+	call.DurationMS = int(duration.Int64)
+	call.Result = resultText.String
+	call.ErrorCategory = errorCategory.String
+	call.ErrorMessage = errorMessage.String
+	var err error
+	call.StartedAt, err = nullableTime(startedRaw)
+	if err != nil {
+		return TaskToolCall{}, err
+	}
+	call.CompletedAt, err = nullableTime(completedRaw)
+	if err != nil {
+		return TaskToolCall{}, err
+	}
+	call.CreatedAt, err = database.ParseTime(createdRaw)
+	if err != nil {
+		return TaskToolCall{}, err
+	}
+	call.UpdatedAt, err = database.ParseTime(updatedRaw)
+	return call, err
 }
 
 type rowScanner interface{ Scan(dest ...any) error }

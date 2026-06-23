@@ -202,6 +202,25 @@ export type TaskRunEvent = {
   created_at: string;
 };
 
+export type TaskToolCall = {
+  id: string;
+  task_run_id: string;
+  mcp_server_id?: string;
+  mcp_tool_id?: string;
+  provider_tool_call_id?: string;
+  tool_name: string;
+  arguments: string;
+  permission_decision: string;
+  state: string;
+  started_at?: string;
+  completed_at?: string;
+  duration_ms?: number;
+  result?: string;
+  result_truncated?: boolean;
+  error_category?: string;
+  error_message?: string;
+};
+
 export type MessageFeedback = {
   id: string;
   message_id: string;
@@ -341,6 +360,7 @@ export type TaskRunResponse = {
 export type TaskRunRecordResponse = {
   run: TaskRun;
   events: TaskRunEvent[];
+  tool_calls: TaskToolCall[];
 };
 
 export type FeedbackResponse = {

@@ -1,12 +1,13 @@
 <script lang="ts">
   import EmptyState from '../components/common/EmptyState.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
-  import type { Agent, Provider, TaskRecord, TaskRun, TaskRunEvent } from '../lib/types';
+  import type { Agent, Provider, TaskRecord, TaskRun, TaskRunEvent, TaskToolCall } from '../lib/types';
   import { strings } from '../strings';
 
   export let taskRecords: TaskRecord[] = [];
   export let taskRuns: TaskRun[] = [];
   export let taskRunEvents: TaskRunEvent[] = [];
+  export let taskRunToolCalls: TaskToolCall[] = [];
   export let agents: Agent[] = [];
   export let providers: Provider[] = [];
   export let editingTaskId = '';
@@ -274,6 +275,27 @@
       <div class="event-log">
         {#each taskRunEvents as event (event.id)}
           <p><strong>{event.level}</strong> {new Date(event.created_at).toLocaleString()} - {event.message}</p>
+        {/each}
+      </div>
+    {/if}
+
+    {#if taskRunToolCalls.length > 0}
+      <div class="event-log">
+        {#each taskRunToolCalls as call (call.id)}
+          <p>
+            <strong>{call.state}</strong>
+            {call.tool_name}
+            <span>permission {call.permission_decision}</span>
+            {#if call.duration_ms}
+              <span>{call.duration_ms} ms</span>
+            {/if}
+            {#if call.result_truncated}
+              <span>truncated</span>
+            {/if}
+            {#if call.error_message}
+              <span class="danger-text">{call.error_message}</span>
+            {/if}
+          </p>
         {/each}
       </div>
     {/if}
