@@ -167,35 +167,80 @@
 <div class="settings-window-layout">
   <nav class="settings-window-nav" aria-label="Settings sections">
     <span>Models</span>
-    <button class:active={activeSection === 'add-provider'} on:click={() => (activeSection = 'add-provider')} type="button">
+    <button
+      aria-current={activeSection === 'add-provider' ? 'page' : undefined}
+      data-active={activeSection === 'add-provider' ? 'true' : undefined}
+      on:click={() => (activeSection = 'add-provider')}
+      type="button"
+    >
       <Icon name="plus" size={14} /> Add Provider
     </button>
-    <button class:active={activeSection === 'providers'} on:click={() => (activeSection = 'providers')} type="button">
+    <button
+      aria-current={activeSection === 'providers' ? 'page' : undefined}
+      data-active={activeSection === 'providers' ? 'true' : undefined}
+      on:click={() => (activeSection = 'providers')}
+      type="button"
+    >
       <Icon name="model" size={14} /> Providers
     </button>
-    <button class:active={activeSection === 'defaults'} on:click={() => (activeSection = 'defaults')} type="button">
+    <button
+      aria-current={activeSection === 'defaults' ? 'page' : undefined}
+      data-active={activeSection === 'defaults' ? 'true' : undefined}
+      on:click={() => (activeSection = 'defaults')}
+      type="button"
+    >
       <Icon name="spark" size={14} /> AI Defaults
     </button>
 
     <span>Workspace</span>
-    <button class:active={activeSection === 'appearance'} on:click={() => (activeSection = 'appearance')} type="button">
+    <button
+      aria-current={activeSection === 'appearance' ? 'page' : undefined}
+      data-active={activeSection === 'appearance' ? 'true' : undefined}
+      on:click={() => (activeSection = 'appearance')}
+      type="button"
+    >
       <Icon name="moon" size={14} /> Appearance
     </button>
-    <button class:active={activeSection === 'shortcuts'} on:click={() => (activeSection = 'shortcuts')} type="button">
+    <button
+      aria-current={activeSection === 'shortcuts' ? 'page' : undefined}
+      data-active={activeSection === 'shortcuts' ? 'true' : undefined}
+      on:click={() => (activeSection = 'shortcuts')}
+      type="button"
+    >
       <Icon name="grid" size={14} /> Shortcuts
     </button>
-    <button class:active={activeSection === 'account'} on:click={() => (activeSection = 'account')} type="button">
+    <button
+      aria-current={activeSection === 'account' ? 'page' : undefined}
+      data-active={activeSection === 'account' ? 'true' : undefined}
+      on:click={() => (activeSection = 'account')}
+      type="button"
+    >
       <Icon name="user" size={14} /> Account
     </button>
 
     <span>Administration</span>
-    <button class:active={activeSection === 'agent-tools'} on:click={() => (activeSection = 'agent-tools')} type="button">
+    <button
+      aria-current={activeSection === 'agent-tools' ? 'page' : undefined}
+      data-active={activeSection === 'agent-tools' ? 'true' : undefined}
+      on:click={() => (activeSection = 'agent-tools')}
+      type="button"
+    >
       <Icon name="agent" size={14} /> Agent Tools
     </button>
-    <button class:active={activeSection === 'sessions'} on:click={() => (activeSection = 'sessions')} type="button">
+    <button
+      aria-current={activeSection === 'sessions' ? 'page' : undefined}
+      data-active={activeSection === 'sessions' ? 'true' : undefined}
+      on:click={() => (activeSection = 'sessions')}
+      type="button"
+    >
       <Icon name="window" size={14} /> Sessions
     </button>
-    <button class:active={activeSection === 'system'} on:click={() => (activeSection = 'system')} type="button">
+    <button
+      aria-current={activeSection === 'system' ? 'page' : undefined}
+      data-active={activeSection === 'system' ? 'true' : undefined}
+      on:click={() => (activeSection = 'system')}
+      type="button"
+    >
       <Icon name="details" size={14} /> System
     </button>
   </nav>

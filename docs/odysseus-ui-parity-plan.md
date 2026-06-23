@@ -209,6 +209,34 @@ This is a clean-room implementation plan. The reference was inspected for intera
 - Add appearance controls for background pattern, density, UI scale, accent color, message width, and reduced motion.
 - Store appearance preferences in `localStorage`.
 
+## Implemented Architecture
+
+- `WorkspaceApp.svelte` remains the state owner for authenticated data, streaming, cancellation, provider/model operations, explicit memories, agents, tasks, MCP, sessions, and diagnostics.
+- `AppShell.svelte` owns only workspace chrome: full-height sidebar, mobile drawer, conversation search, archived/recent filters, row overflow menus, and workspace-window launchers.
+- `ChatView.svelte` is the persistent canvas. It renders compact conversation metadata, the summary popover, message anatomy, message menus/details/report flow, and the fixed composer.
+- `WorkspaceWindow.svelte` is the reusable window primitive. It provides title bars, draggable desktop behavior, z-index activation, minimize/close controls, Escape handling, focus return, and mobile full-screen panel behavior.
+- `SettingsView.svelte` contains provider administration, model defaults, appearance, shortcuts, account, sessions, system, and agent-tool administration as settings panels.
+- `ModelPicker.svelte` is shared by the composer and AI defaults. It uses grouped search, keyboard navigation, complete model IDs, manual model entry, copy affordance, visible result counts, and incremental rendering for large catalogs.
+- `MemoriesView.svelte`, `AgentsView.svelte`, `TasksView.svelte`, and `MCPView.svelte` now render dense workspace-window content while keeping existing backend routes and data contracts.
+- `workspace.css` scopes the Nostos dark workspace theme and keeps legacy dashboard styling from driving the new shell.
+- `scripts/capture-ui-screenshots.mjs` seeds the e2e runtime, captures the required validation views, and supports configurable mock provider/MCP endpoints for isolated runs.
+
+## Visual Validation
+
+The required screenshots were captured and manually inspected at `1600x900`, `1365x768`, and `390x844`:
+
+- `docs/screenshots/ui-chat-desktop.png`
+- `docs/screenshots/ui-sidebar-conversations.png`
+- `docs/screenshots/ui-settings-models.png`
+- `docs/screenshots/ui-settings-defaults.png`
+- `docs/screenshots/ui-memories-window.png`
+- `docs/screenshots/ui-agents-window.png`
+- `docs/screenshots/ui-tasks-window.png`
+- `docs/screenshots/ui-tools-window.png`
+- `docs/screenshots/ui-mobile-chat.png`
+
+Inspection notes: the old dashboard page structure is absent, chat remains visible behind windows, sidebar density is within the target range, composer controls fit without overlap, settings/provider/model-default flows are windowed, module windows are compact, and the mobile layout avoids horizontal scrolling.
+
 ## Milestone Checklist
 
 - [x] Audit Nostos current frontend and Odysseus reference.
@@ -222,6 +250,6 @@ This is a clean-room implementation plan. The reference was inspected for intera
 - [x] Restyle and harden ModelPicker for large catalogs.
 - [x] Add responsive sidebar/drawer/window behavior.
 - [x] Add focused component and e2e coverage.
-- [ ] Capture and inspect required screenshots.
+- [x] Capture and inspect required screenshots.
 - [ ] Run required Go, pnpm, Docker, PostgreSQL, and SQLite validation.
 - [ ] Commit milestone-sized changes and push `feat/odysseus-ui-parity`.
