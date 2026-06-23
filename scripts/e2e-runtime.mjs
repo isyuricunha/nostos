@@ -15,6 +15,15 @@ const children = [];
 let providerRequests = [];
 let toolExecutions = 0;
 let runtimeReady = false;
+const modelCatalog = [
+  { id: 'e2e-model' },
+  { id: 'e2e-fallback' },
+  { id: 'NVIDIA NIM/openai/gpt-oss-120b' },
+  { id: 'NVIDIA NIM/moonshotai/kimi-k2.6' }
+];
+for (let index = modelCatalog.length; index < 800; index += 1) {
+  modelCatalog.push({ id: `Bifrost/generated/model-${String(index).padStart(3, '0')}` });
+}
 
 const provider = createServer(async (request, response) => {
   if (request.url === '/health') {
@@ -24,7 +33,7 @@ const provider = createServer(async (request, response) => {
   }
   if (request.url === '/v1/models') {
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ data: [{ id: 'e2e-model' }, { id: 'e2e-fallback' }] }));
+    response.end(JSON.stringify({ data: modelCatalog }));
     return;
   }
   if (request.url === '/v1/chat/completions') {

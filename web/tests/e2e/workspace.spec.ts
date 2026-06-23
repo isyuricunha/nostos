@@ -47,9 +47,7 @@ test('owner workspace release flow', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Chat' }).click();
   await page.getByRole('button', { name: 'New conversation' }).click();
-  await page.getByLabel('Provider').selectOption({ label: 'Mock Provider' });
   await page.getByLabel('Agent').selectOption({ label: 'E2E Agent' });
-  await page.getByLabel('Model ID').fill('e2e-model');
   await sendChat(page, 'My name is Yuri.');
   await expect(page.getByText('Hello from the mock provider.').first()).toBeVisible();
   await sendChat(page, 'What is my name?');
@@ -60,13 +58,14 @@ test('owner workspace release flow', async ({ page }) => {
   await sendChat(page, 'Use the pinned memory and answer briefly.');
   await expect(page.getByText('Memories used in this response')).toBeVisible();
 
-  await page.getByRole('button', { name: 'Thumbs up' }).first().click();
+  await openFirstMessageActions(page, 'Report response');
+  await page.getByRole('button', { name: 'Helpful' }).first().click();
   await page.getByLabel('Negative feedback reason').first().selectOption('Too long');
-  await page.getByRole('button', { name: 'Thumbs down' }).first().click();
-  await page.getByRole('button', { name: 'Regenerate' }).first().click();
+  await page.getByRole('button', { name: 'Needs work' }).first().click();
+  await openFirstMessageActions(page, 'Regenerate');
   await expect(page.getByText('Regeneration instruction')).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Draft reply' }).first().click();
+  await openFirstMessageActions(page, 'Draft reply');
   await page.getByLabel('Preset').selectOption({ label: 'Negative' });
   await page.getByRole('button', { name: 'Generate draft' }).click();
   await expect(page.getByLabel('Generated reply draft')).toHaveValue(/Not really/);
@@ -95,14 +94,14 @@ test('owner workspace release flow', async ({ page }) => {
 
 async function visitPrimaryScreens(page: Page): Promise<void> {
   for (const name of ['Providers', 'Agents', 'Memories', 'Tasks', 'MCP', 'Settings', 'Chat']) {
-    await page.getByRole('button', { name }).click();
+    await page.getByRole('button', { name, exact: true }).click();
     await expect(page.getByRole('heading', { level: 1, name })).toBeVisible();
   }
 }
 
 async function createProvider(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Providers' }).click();
-  await page.getByLabel('Name').fill('Mock Provider');
+  await page.getByLabel('Name', { exact: true }).fill('Mock Provider');
   await page.getByLabel('Base URL').fill('http://127.0.0.1:17011');
   await page.getByLabel('API key').fill('mock-key');
   await page.getByLabel('Default model').fill('e2e-model');
@@ -113,11 +112,14 @@ async function createProvider(page: Page): Promise<void> {
   await expect(page.getByText('Provider connection succeeded.')).toBeVisible();
   await page.getByRole('button', { name: 'Refresh models' }).click();
   await expect(page.getByText('Models refreshed.')).toBeVisible();
+  const models = await api<{ models: Array<{ model_id: string; provider_id: string }> }>(page, '/api/v1/models?limit=1000&include_unavailable=true');
+  expect(models.models.length).toBeGreaterThanOrEqual(800);
+  expect(models.models.some((model) => model.model_id === 'NVIDIA NIM/openai/gpt-oss-120b')).toBeTruthy();
 }
 
 async function createAgent(page: Page): Promise<string> {
   await page.getByRole('button', { name: 'Agents' }).click();
-  await page.getByLabel('Name').fill('E2E Agent');
+  await page.getByLabel('Name', { exact: true }).fill('E2E Agent');
   await page.getByLabel('Description').fill('Agent used by browser E2E.');
   await page.getByLabel('System prompt').fill('Use the selected memories and approved tools.');
   await page.getByLabel('Default provider').selectOption({ label: 'Mock Provider' });
@@ -131,7 +133,7 @@ async function createAgent(page: Page): Promise<string> {
 
 async function createMCPServerAndDiscoverTool(page: Page): Promise<{ serverId: string; toolId: string }> {
   await page.getByRole('button', { name: 'MCP' }).click();
-  await page.getByLabel('Name').fill('Mock MCP');
+  await page.getByLabel('Name', { exact: true }).fill('Mock MCP');
   await page.getByLabel('Description').fill('Mock MCP server.');
   await page.getByLabel('HTTP URL').fill('http://127.0.0.1:17012/mcp');
   await page.getByRole('button', { name: 'Add MCP server' }).click();
@@ -156,7 +158,7 @@ async function createMemory(page: Page): Promise<void> {
 
 async function createAndRunTask(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Tasks' }).click();
-  await page.getByLabel('Name').fill('E2E task');
+  await page.getByLabel('Name', { exact: true }).fill('E2E task');
   await page.getByLabel('Type').selectOption('agent');
   await page.getByLabel('Prompt').fill('Use approval tool to check API status.');
   await page.getByRole('combobox', { name: 'Agent', exact: true }).selectOption({ label: 'E2E Agent' });
@@ -184,6 +186,21 @@ async function createAndRunTask(page: Page): Promise<void> {
 async function sendChat(page: Page, content: string): Promise<void> {
   await page.getByPlaceholder('Send a message...').fill(content);
   await page.getByRole('button', { name: 'Send' }).click();
+}
+
+async function openFirstMessageActions(page: Page, actionName: string): Promise<void> {
+  const menus = page.getByRole('button', { name: 'Actions' });
+  const count = await menus.count();
+  for (let index = 0; index < count; index += 1) {
+    await menus.nth(index).click();
+    const action = page.getByRole('button', { name: actionName }).first();
+    if (await action.isVisible().catch(() => false)) {
+      await action.click();
+      return;
+    }
+    await menus.nth(index).click();
+  }
+  throw new Error(`Message action not found: ${actionName}`);
 }
 
 async function api<T = unknown>(page: Page, path: string, method = 'GET', body?: unknown): Promise<T> {
