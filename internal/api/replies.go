@@ -33,7 +33,7 @@ func (h *repliesHandler) listPresets(w http.ResponseWriter, r *http.Request) {
 		h.writeReplyError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"presets": presets})
+	writeJSON(w, http.StatusOK, map[string]any{"presets": jsonSlice(presets)})
 }
 
 func (h *repliesHandler) createPreset(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +84,7 @@ func (h *repliesHandler) listDrafts(w http.ResponseWriter, r *http.Request) {
 		h.writeReplyError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"drafts": drafts})
+	writeJSON(w, http.StatusOK, map[string]any{"drafts": jsonSlice(drafts)})
 }
 
 func (h *repliesHandler) generateDraft(w http.ResponseWriter, r *http.Request) {

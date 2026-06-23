@@ -30,7 +30,7 @@ func (h *feedbackHandler) list(w http.ResponseWriter, r *http.Request) {
 		h.writeFeedbackError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"feedback": items})
+	writeJSON(w, http.StatusOK, map[string]any{"feedback": jsonSlice(items)})
 }
 
 func (h *feedbackHandler) upsert(w http.ResponseWriter, r *http.Request) {

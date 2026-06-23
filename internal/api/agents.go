@@ -35,7 +35,7 @@ func (h *agentsHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "agents_failed", "Unable to list agents.", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agents": items})
+	writeJSON(w, http.StatusOK, map[string]any{"agents": jsonSlice(items)})
 }
 
 func (h *agentsHandler) create(w http.ResponseWriter, r *http.Request) {

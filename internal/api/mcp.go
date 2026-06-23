@@ -37,7 +37,7 @@ func (h *mcpHandler) listServers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "mcp_servers_failed", "Unable to list MCP servers.", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"servers": items})
+	writeJSON(w, http.StatusOK, map[string]any{"servers": jsonSlice(items)})
 }
 
 func (h *mcpHandler) createServer(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +80,7 @@ func (h *mcpHandler) discoverTools(w http.ResponseWriter, r *http.Request) {
 		h.writeMCPError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tools": tools})
+	writeJSON(w, http.StatusOK, map[string]any{"tools": jsonSlice(tools)})
 }
 
 func (h *mcpHandler) listTools(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +89,7 @@ func (h *mcpHandler) listTools(w http.ResponseWriter, r *http.Request) {
 		h.writeMCPError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tools": tools})
+	writeJSON(w, http.StatusOK, map[string]any{"tools": jsonSlice(tools)})
 }
 
 func (h *mcpHandler) updateToolPermission(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +112,7 @@ func (h *mcpHandler) listAgentServerAssignments(w http.ResponseWriter, r *http.R
 		h.writeMCPError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"server_ids": ids})
+	writeJSON(w, http.StatusOK, map[string]any{"server_ids": jsonSlice(ids)})
 }
 
 func (h *mcpHandler) assignAgentServers(w http.ResponseWriter, r *http.Request) {

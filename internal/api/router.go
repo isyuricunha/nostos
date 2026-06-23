@@ -190,6 +190,13 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
+func jsonSlice[T any](items []T) []T {
+	if items == nil {
+		return []T{}
+	}
+	return items
+}
+
 func writeError(w http.ResponseWriter, r *http.Request, status int, code string, message string, details map[string]any) {
 	writeJSON(w, status, APIError{
 		Error: ErrorBody{

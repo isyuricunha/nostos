@@ -32,7 +32,7 @@ func (h *memoriesHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "memories_failed", "Unable to list memories.", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"memories": items})
+	writeJSON(w, http.StatusOK, map[string]any{"memories": jsonSlice(items)})
 }
 
 func (h *memoriesHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +75,7 @@ func (h *memoriesHandler) usedByRun(w http.ResponseWriter, r *http.Request) {
 		h.writeMemoryError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"memories": items})
+	writeJSON(w, http.StatusOK, map[string]any{"memories": jsonSlice(items)})
 }
 
 func (h *memoriesHandler) removeFromRun(w http.ResponseWriter, r *http.Request) {

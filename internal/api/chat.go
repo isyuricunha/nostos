@@ -46,7 +46,7 @@ func (h *chatHandler) listConversations(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusInternalServerError, "conversations_failed", "Unable to list conversations.", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"conversations": items})
+	writeJSON(w, http.StatusOK, map[string]any{"conversations": jsonSlice(items)})
 }
 
 func (h *chatHandler) createConversation(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +116,7 @@ func (h *chatHandler) listMessages(w http.ResponseWriter, r *http.Request) {
 		h.writeChatError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": items})
+	writeJSON(w, http.StatusOK, map[string]any{"messages": jsonSlice(items)})
 }
 
 func (h *chatHandler) run(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +149,7 @@ func (h *chatHandler) pendingToolApprovals(w http.ResponseWriter, r *http.Reques
 		h.writeChatError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tool_calls": items})
+	writeJSON(w, http.StatusOK, map[string]any{"tool_calls": jsonSlice(items)})
 }
 
 func (h *chatHandler) approveToolCall(w http.ResponseWriter, r *http.Request) {

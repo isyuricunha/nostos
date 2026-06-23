@@ -122,7 +122,7 @@ func (h *authHandler) sessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "sessions_failed", "Unable to list sessions.", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": jsonSlice(sessions)})
 }
 
 func (h *authHandler) logout(w http.ResponseWriter, r *http.Request) {

@@ -35,7 +35,7 @@ func (h *tasksHandler) listTasks(w http.ResponseWriter, r *http.Request) {
 		h.writeTaskError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": records})
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": jsonSlice(records)})
 }
 
 func (h *tasksHandler) createTask(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +87,7 @@ func (h *tasksHandler) listRuns(w http.ResponseWriter, r *http.Request) {
 		h.writeTaskError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+	writeJSON(w, http.StatusOK, map[string]any{"runs": jsonSlice(runs)})
 }
 
 func (h *tasksHandler) getRun(w http.ResponseWriter, r *http.Request) {

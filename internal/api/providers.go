@@ -37,7 +37,7 @@ func (h *providersHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "providers_failed", "Unable to list providers.", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"providers": items})
+	writeJSON(w, http.StatusOK, map[string]any{"providers": jsonSlice(items)})
 }
 
 func (h *providersHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +97,7 @@ func (h *providersHandler) refreshModels(w http.ResponseWriter, r *http.Request)
 		h.writeProviderError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	writeJSON(w, http.StatusOK, map[string]any{"models": jsonSlice(models)})
 }
 
 func (h *providersHandler) models(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +106,7 @@ func (h *providersHandler) models(w http.ResponseWriter, r *http.Request) {
 		h.writeProviderError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	writeJSON(w, http.StatusOK, map[string]any{"models": jsonSlice(models)})
 }
 
 func (h *providersHandler) modelsByQuery(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +116,7 @@ func (h *providersHandler) modelsByQuery(w http.ResponseWriter, r *http.Request)
 		h.writeProviderError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	writeJSON(w, http.StatusOK, map[string]any{"models": jsonSlice(models)})
 }
 
 func (h *providersHandler) writeProviderError(w http.ResponseWriter, r *http.Request, err error) {
