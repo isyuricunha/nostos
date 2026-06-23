@@ -139,6 +139,16 @@
       activeIndex = Math.max(activeIndex - 1, 0);
       return;
     }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      activeIndex = 0;
+      return;
+    }
+    if (event.key === 'End') {
+      event.preventDefault();
+      activeIndex = Math.max(renderedModels.length - 1, 0);
+      return;
+    }
     if (event.key === 'Enter' && renderedModels[activeIndex]) {
       event.preventDefault();
       selectModel(renderedModels[activeIndex]);

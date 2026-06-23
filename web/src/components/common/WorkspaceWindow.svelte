@@ -8,6 +8,7 @@
   export let icon: IconName = 'window';
   export let width = 760;
   export let height = 620;
+  export let active = true;
   export let onClose: () => void = () => undefined;
   export let onMinimize: () => void = () => undefined;
   export let onActivate: () => void = () => undefined;
@@ -152,6 +153,7 @@
   aria-labelledby={`${id}-title`}
   aria-modal="true"
   class="workspace-window"
+  class:active
   data-window-id={id}
   on:keydown={handleKeydown}
   on:mousedown={onActivate}
@@ -190,6 +192,14 @@
     background: var(--workspace-window);
     box-shadow: var(--workspace-window-shadow);
     color: var(--color-text);
+  }
+
+  .workspace-window.active {
+    border-color: color-mix(in srgb, var(--color-accent) 35%, var(--workspace-border-strong));
+    box-shadow:
+      0 26px 96px rgba(0, 0, 0, 0.68),
+      0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent),
+      0 1px 0 rgba(255, 255, 255, 0.05) inset;
   }
 
   .workspace-window:focus {
@@ -231,10 +241,20 @@
 
   .icon-only {
     display: grid;
-    width: 27px;
-    height: 27px;
+    width: 29px;
+    height: 29px;
     place-items: center;
     padding: 0;
+    border-color: var(--workspace-border);
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--color-text-soft);
+  }
+
+  .icon-only:hover,
+  .icon-only:focus-visible {
+    border-color: var(--workspace-border-strong);
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--color-text);
   }
 
   .workspace-window-body {

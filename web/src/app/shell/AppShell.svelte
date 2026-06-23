@@ -40,6 +40,14 @@
 
   onMount(() => {
     collapsed = localStorage.getItem('nostos-sidebar-collapsed') === 'true';
+    function handleDocumentClick(event: MouseEvent): void {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('.row-menu, .row-menu-button')) return;
+      openConversationMenuId = '';
+    }
+    document.addEventListener('click', handleDocumentClick);
+    return () => document.removeEventListener('click', handleDocumentClick);
   });
 
   $: activeConversations = conversations.filter((conversation) => !conversation.archived_at);
@@ -83,6 +91,10 @@
   }
 
   function handleConversationKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      openConversationMenuId = '';
+      return;
+    }
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
     const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('.conversation-row-main'));
     const index = buttons.indexOf(event.currentTarget as HTMLButtonElement);
@@ -94,9 +106,11 @@
 </script>
 
 <main class="workspace-shell" class:sidebar-collapsed={collapsed} class:sidebar-open={mobileOpen}>
-  <button aria-label="Open navigation" class="mobile-sidebar-button" on:click={() => (mobileOpen = true)} type="button">
-    <Icon name="menu" size={18} />
-  </button>
+  {#if activeView === strings.nav.chat}
+    <button aria-label="Open navigation" class="mobile-sidebar-button" on:click={() => (mobileOpen = true)} type="button">
+      <Icon name="menu" size={18} />
+    </button>
+  {/if}
 
   {#if mobileOpen}
     <button aria-label="Close navigation" class="sidebar-scrim" on:click={() => (mobileOpen = false)} type="button"></button>

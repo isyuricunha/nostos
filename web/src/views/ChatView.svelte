@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, tick } from 'svelte';
   import PendingToolApprovals from '../components/chat/PendingToolApprovals.svelte';
   import Icon from '../components/common/Icon.svelte';
   import ModelPicker from '../components/models/ModelPicker.svelte';
@@ -26,6 +27,7 @@
   export let selectedModel = '';
   export let composer = '';
   export let activeRunId = '';
+  export let streamState: 'idle' | 'connecting' | 'streaming' | 'completed' | 'failed' | 'cancelled' = 'idle';
   export let submitting = false;
   export let runMemories: MemorySnippet[] = [];
   export let toolCards: ToolCard[] = [];
@@ -58,10 +60,12 @@
   export let onDenyToolCall: (toolCall: ToolCall, decision: 'deny' | 'deny_disable_tool') => void | Promise<void>;
 
   let composerElement: HTMLTextAreaElement;
+  let messageStreamElement: HTMLDivElement;
   let summaryOpen = false;
   let openMenuMessageId = '';
   let feedbackPanelMessageId = '';
   let detailsMessageId = '';
+  let lastScrollSignature = '';
 
   $: activeAgent = agents.find((agent) => agent.id === selectedAgentId);
   $: activeProvider = providers.find((provider) => provider.id === selectedProviderId);
@@ -69,6 +73,30 @@
   $: title = selectedConversation?.title ?? strings.chat.newConversation;
   $: messageCountLabel = `${messages.length} ${messages.length === 1 ? 'message' : 'messages'}`;
   $: activeModelLabel = activeModel?.display_name || selectedModel || 'Select model';
+  $: isGenerating = Boolean(activeRunId) || streamState === 'connecting' || streamState === 'streaming';
+  $: scrollSignature = `${messages.length}:${messages[messages.length - 1]?.id ?? ''}:${messages[messages.length - 1]?.content.length ?? 0}:${activeRunId}:${streamState}`;
+  $: if (scrollSignature !== lastScrollSignature) {
+    lastScrollSignature = scrollSignature;
+    void scrollMessagesToBottom();
+  }
+
+  onMount(() => {
+    function handleDocumentClick(event: MouseEvent): void {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (
+        target.closest(
+          '.message-menu, .message-action-strip, .message-details-panel, .message-feedback-panel, .conversation-meta, .reply-draft-popover, .model-picker'
+        )
+      ) {
+        return;
+      }
+      closeTransientPanels();
+    }
+
+    document.addEventListener('click', handleDocumentClick);
+    return () => document.removeEventListener('click', handleDocumentClick);
+  });
 
   async function copyMessage(message: Message): Promise<void> {
     if (window.navigator.clipboard) {
@@ -87,10 +115,33 @@
     composerElement.style.height = `${Math.min(composerElement.scrollHeight, 180)}px`;
   }
 
+  function closeTransientPanels(): void {
+    openMenuMessageId = '';
+    detailsMessageId = '';
+    feedbackPanelMessageId = '';
+    summaryOpen = false;
+  }
+
+  function streamStateLabel(): string {
+    if (streamState === 'connecting') return 'Connecting';
+    if (streamState === 'streaming') return 'Generating';
+    if (streamState === 'failed') return 'Failed';
+    if (streamState === 'cancelled') return 'Stopped';
+    return '';
+  }
+
+  async function scrollMessagesToBottom(): Promise<void> {
+    await tick();
+    if (!messageStreamElement) return;
+    messageStreamElement.scrollTo({
+      top: messageStreamElement.scrollHeight,
+      behavior: 'auto'
+    });
+  }
+
   async function handleComposerKeydown(event: KeyboardEvent): Promise<void> {
     if (event.key === 'Escape') {
-      openMenuMessageId = '';
-      summaryOpen = false;
+      closeTransientPanels();
       return;
     }
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -102,10 +153,7 @@
 
   function handleCanvasKeydown(event: KeyboardEvent): void {
     if (event.key !== 'Escape') return;
-    openMenuMessageId = '';
-    detailsMessageId = '';
-    feedbackPanelMessageId = '';
-    summaryOpen = false;
+    closeTransientPanels();
   }
 
   function switchMode(mode: 'chat' | 'agent'): void {
@@ -169,7 +217,7 @@
     {/if}
   </div>
 
-  <div class="message-stream" aria-live="polite">
+  <div bind:this={messageStreamElement} class="message-stream" aria-live="polite">
     {#if messages.length === 0}
       <div class="chat-empty-state">
         <Icon name="spark" size={18} />
@@ -189,7 +237,14 @@
           <!-- eslint-disable-next-line svelte/no-at-html-tags -->
           <div class="markdown-body">{@html renderMarkdown(message.content)}</div>
 
-          {#if message.content}
+          {#if message.role === 'assistant' && index === messages.length - 1 && isGenerating}
+            <div class="generation-indicator" role="status">
+              <span aria-hidden="true"></span>
+              <strong>{streamStateLabel()}</strong>
+            </div>
+          {/if}
+
+          {#if message.content || (message.role === 'assistant' && index === messages.length - 1)}
             <footer class="message-footer">
               <div class="message-metrics">
                 {#if message.total_tokens}
@@ -232,13 +287,22 @@
           {#if openMenuMessageId === message.id}
             <div class="message-menu" role="menu">
               {#if message.role === 'user'}
+                <button on:click={() => copyMessage(message)} type="button">
+                  <Icon name="copy" size={13} /> Copy
+                </button>
                 <button on:click={() => { openMenuMessageId = ''; onEditMessage(message); }} type="button">
                   <Icon name="edit" size={13} /> Edit
+                </button>
+                <button on:click={() => { openMenuMessageId = ''; onRegenerateWithFeedback(message, undefined); }} type="button">
+                  <Icon name="refresh" size={13} /> Regenerate from here
                 </button>
                 <button on:click={() => { openMenuMessageId = ''; onSelectReplySource(message); }} type="button">
                   <Icon name="chat" size={13} /> Use as reply source
                 </button>
               {:else}
+                <button on:click={() => copyMessage(message)} type="button">
+                  <Icon name="copy" size={13} /> Copy
+                </button>
                 <button on:click={() => { openMenuMessageId = ''; onRegenerateWithFeedback(message, undefined); }} type="button">
                   <Icon name="refresh" size={13} /> Regenerate from here
                 </button>
@@ -467,6 +531,9 @@
       <span title={selectedModel}>{activeProvider?.name ?? 'No provider'} · {activeModelLabel}</span>
       {#if activeAgent}
         <span>Agent: {activeAgent.name}</span>
+      {/if}
+      {#if isGenerating}
+        <span class="composer-run-state">{streamStateLabel()}</span>
       {/if}
       <kbd>Enter</kbd>
     </div>
