@@ -36,6 +36,9 @@
     MemorySnippet,
     Message,
     MessageFeedback,
+    ModelRefreshResponse,
+    ModelRolesResponse,
+    ModelRoleBinding,
     MessagesResponse,
     ModelsResponse,
     Provider,
@@ -84,6 +87,7 @@
   let status: ReadyStatus | null = null;
   let providers: Provider[] = [];
   let providerModels: ProviderModel[] = [];
+  let modelRoles: ModelRoleBinding[] = [];
   let conversations: Conversation[] = [];
   let messages: Message[] = [];
   let agents: Agent[] = [];
@@ -108,6 +112,12 @@
   let selectedAgentId = '';
   let selectedProviderId = '';
   let selectedModel = '';
+  let chatRoleProviderId = '';
+  let chatRoleModel = '';
+  let utilityRoleProviderId = '';
+  let utilityRoleModel = '';
+  let visionRoleProviderId = '';
+  let visionRoleModel = '';
   let composer = '';
   let activeRunId = '';
   let activeView: string = strings.nav.chat;
@@ -239,6 +249,8 @@
       refreshSessions(),
       refreshDiagnostics(),
       refreshProviders(),
+      refreshModels(),
+      refreshModelRoles(),
       refreshAgents(),
       refreshMemories(),
       refreshMCP(),
@@ -334,20 +346,44 @@
     if (!selectedProviderId && providers.length > 0) {
       selectedProviderId = providers[0].id;
       selectedModel = providers[0].default_model ?? '';
-      await refreshModels(selectedProviderId);
     }
   }
 
-  async function refreshModels(providerId = selectedProviderId): Promise<void> {
-    if (!providerId) {
-      providerModels = [];
+  async function refreshModels(providerId = ''): Promise<void> {
+    const providerQuery = providerId ? `&provider_id=${encodeURIComponent(providerId)}` : '';
+    const response = await getJSON<ModelsResponse>(`/api/v1/models?limit=500&include_unavailable=true${providerQuery}`);
+    providerModels = response.models ?? [];
+    if ((!selectedProviderId || !selectedModel) && providerModels.length > 0) {
+      selectedProviderId = selectedProviderId || providerModels[0].provider_id;
+      selectedModel = selectedModel || providerModels[0].model_id;
+    }
+  }
+
+  async function refreshModelRoles(): Promise<void> {
+    const response = await getJSON<ModelRolesResponse>('/api/v1/model-roles');
+    modelRoles = response.roles ?? [];
+    const chatRole = modelRoles.find((role) => role.role === 'chat' && role.position === 0);
+    const utilityRole = modelRoles.find((role) => role.role === 'utility' && role.position === 0);
+    const visionRole = modelRoles.find((role) => role.role === 'vision' && role.position === 0);
+    chatRoleProviderId = chatRole?.provider_id ?? chatRoleProviderId;
+    chatRoleModel = chatRole?.model_id ?? chatRoleModel;
+    utilityRoleProviderId = utilityRole?.provider_id ?? utilityRoleProviderId;
+    utilityRoleModel = utilityRole?.model_id ?? utilityRoleModel;
+    visionRoleProviderId = visionRole?.provider_id ?? visionRoleProviderId;
+    visionRoleModel = visionRole?.model_id ?? visionRoleModel;
+  }
+
+  async function saveModelRole(role: 'chat' | 'utility' | 'vision', providerId: string, modelId: string): Promise<void> {
+    if (!providerId || !modelId) {
+      errorMessage = 'Select both a provider and model before saving this role.';
       return;
     }
-    const response = await getJSON<ModelsResponse>(`/api/v1/providers/${providerId}/models`);
-    providerModels = response.models ?? [];
-    if (!selectedModel && providerModels.length > 0) {
-      selectedModel = providerModels[0].model_id;
-    }
+    const response = await putJSON<ModelRolesResponse>(`/api/v1/model-roles/${role}`, {
+      models: [{ provider_id: providerId, model_id: modelId }]
+    });
+    modelRoles = response.roles ?? [];
+    notice = `${role} model saved.`;
+    await refreshModelRoles();
   }
 
   async function createProvider(): Promise<void> {
@@ -457,14 +493,29 @@
     submitting = true;
     errorMessage = '';
     try {
-      const response = await postJSON<ModelsResponse>(`/api/v1/providers/${providerId}/models/refresh`);
-      providerModels = response.models ?? [];
       selectedProviderId = providerId;
-      if (providerModels.length > 0) {
-        selectedModel = providerModels[0].model_id;
+      await postJSON<ModelRefreshResponse>(`/api/v1/providers/${providerId}/models/refresh`);
+      notice = 'Model refresh started.';
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        const status = await getJSON<ModelRefreshResponse>(`/api/v1/providers/${providerId}/models/refresh-status`);
+        if (status.refresh.state === 'succeeded') {
+          await refreshModels();
+          const firstModel = providerModels.find((model) => model.provider_id === providerId);
+          if (firstModel) {
+            selectedModel = firstModel.model_id;
+          }
+          await refreshProviders();
+          notice = 'Models refreshed.';
+          return;
+        }
+        if (status.refresh.state === 'failed') {
+          throw new Error(status.refresh.error_message || 'Model refresh failed.');
+        }
       }
+      await refreshModels();
       await refreshProviders();
-      notice = 'Models refreshed.';
+      notice = 'Model refresh is still running.';
     } catch (error) {
       errorMessage = messageFromError(error);
     } finally {
@@ -501,7 +552,37 @@
       selectedAgentId = conversation.agent_id || selectedAgentId;
       selectedProviderId = conversation.provider_id || selectedProviderId;
       selectedModel = conversation.model || selectedModel;
-      await refreshModels(selectedProviderId);
+      await refreshModels();
+    }
+  }
+
+  async function renameConversation(conversation: Conversation): Promise<void> {
+    const title = window.prompt('Rename conversation', conversation.title);
+    if (!title || title.trim() === conversation.title) {
+      return;
+    }
+    const response = await putJSON<ConversationResponse>(`/api/v1/conversations/${conversation.id}`, { title: title.trim() });
+    conversations = conversations.map((item) => (item.id === conversation.id ? response.conversation : item));
+  }
+
+  async function archiveConversation(conversation: Conversation): Promise<void> {
+    const response = await putJSON<ConversationResponse>(`/api/v1/conversations/${conversation.id}`, { archive: true });
+    conversations = conversations.map((item) => (item.id === conversation.id ? response.conversation : item));
+    if (selectedConversationId === conversation.id) {
+      selectedConversationId = '';
+      messages = [];
+    }
+  }
+
+  async function deleteConversation(conversation: Conversation): Promise<void> {
+    if (!confirm(`Delete "${conversation.title}"?`)) {
+      return;
+    }
+    await deleteJSON<{ ok: boolean }>(`/api/v1/conversations/${conversation.id}`);
+    conversations = conversations.filter((item) => item.id !== conversation.id);
+    if (selectedConversationId === conversation.id) {
+      selectedConversationId = '';
+      messages = [];
     }
   }
 
@@ -535,10 +616,6 @@
 
   async function sendMessage(): Promise<void> {
     if (!composer.trim()) {
-      return;
-    }
-    if (!selectedProviderId) {
-      errorMessage = 'Select a provider before sending a message.';
       return;
     }
     if (!selectedConversationId) {
@@ -1215,7 +1292,21 @@
     submitting={submitting}
   />
 {:else}
-  <AppShell bind:activeView {navItems} {status} {submitting} {user} onLogout={logout}>
+  <AppShell
+    bind:activeView
+    {conversations}
+    {navItems}
+    onArchiveConversation={archiveConversation}
+    onCreateConversation={createConversation}
+    onDeleteConversation={deleteConversation}
+    onLogout={logout}
+    onRenameConversation={renameConversation}
+    onSelectConversation={selectConversation}
+    {selectedConversationId}
+    {status}
+    {submitting}
+    {user}
+  >
     {#if notice}
       <Notice tone="success">{notice}</Notice>
     {/if}
@@ -1235,11 +1326,20 @@
           onRefreshSessions={refreshSessions}
           onResetReplyPresets={resetReplyPresets}
           onRevokeSession={revokeSession}
+          onSaveModelRole={saveModelRole}
           onToggleReplyPreset={toggleReplyPreset}
+          {providerModels}
+          {providers}
           {replyPresets}
           {sessions}
           {status}
           {submitting}
+          bind:chatRoleModel
+          bind:chatRoleProviderId
+          bind:utilityRoleModel
+          bind:utilityRoleProviderId
+          bind:visionRoleModel
+          bind:visionRoleProviderId
           {user}
         />
       {:else}
@@ -1248,14 +1348,12 @@
             {activeRunId}
             {agents}
             bind:composer
-            {conversations}
             {feedbackByMessage}
             {messages}
             bind:negativeFeedbackReason
             onApproveToolCall={approveToolCall}
             onClearFeedback={clearFeedback}
             onClearSummary={clearSummary}
-            onCreateConversation={createConversation}
             onDenyToolCall={denyToolCall}
             onGenerateReplyDraft={generateReplyDraft}
             onInsertReplyDraft={insertReplyDraft}
@@ -1264,7 +1362,6 @@
             onRegenerateSummary={regenerateSummary}
             onRegenerateWithFeedback={regenerateWithFeedback}
             onRememberMessage={rememberMessage}
-            onSelectConversation={selectConversation}
             onSelectReplySource={selectReplySource}
             onSendMessage={sendMessage}
             onStopGeneration={stopGeneration}
@@ -1279,7 +1376,6 @@
             {runMemories}
             {selectedConversation}
             bind:selectedAgentId
-            bind:selectedConversationId
             bind:selectedModel
             bind:selectedProviderId
             bind:selectedReplyPresetId

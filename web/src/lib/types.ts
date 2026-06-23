@@ -30,11 +30,58 @@ export type Provider = {
   health_latency_ms?: number;
   last_error?: string;
   api_key_env_ref?: string;
+  model_refresh_state?: string;
+  model_refresh_started_at?: string;
+  model_refresh_completed_at?: string;
+  model_refresh_duration_ms?: number;
+  model_refresh_error_category?: string;
+  model_refresh_error_message?: string;
+  model_count?: number;
+  available_model_count?: number;
+  unavailable_model_count?: number;
 };
 
 export type ProviderModel = {
   id: string;
+  workspace_id: string;
   provider_id: string;
+  provider_name?: string;
+  model_id: string;
+  display_name?: string;
+  source?: string;
+  active?: boolean;
+  enabled?: boolean;
+  manually_added?: boolean;
+  available?: boolean;
+  capabilities?: string[];
+  capability_source?: string;
+  last_error_category?: string;
+  last_safe_error_message?: string;
+  first_seen_at?: string;
+  last_seen_at?: string;
+  updated_at?: string;
+};
+
+export type ModelRefreshStatus = {
+  provider_id: string;
+  state: string;
+  started_at?: string;
+  completed_at?: string;
+  duration_ms?: number;
+  error_category?: string;
+  error_message?: string;
+  cached_model_count: number;
+  available_model_count: number;
+  unavailable_model_count: number;
+};
+
+export type ModelRoleBinding = {
+  id: string;
+  workspace_id: string;
+  role: 'chat' | 'utility' | 'vision';
+  position: number;
+  provider_id: string;
+  provider_name?: string;
   model_id: string;
 };
 
@@ -290,6 +337,18 @@ export type ProviderResponse = {
 
 export type ModelsResponse = {
   models: ProviderModel[];
+};
+
+export type ModelResponse = {
+  model: ProviderModel;
+};
+
+export type ModelRefreshResponse = {
+  refresh: ModelRefreshStatus;
+};
+
+export type ModelRolesResponse = {
+  roles: ModelRoleBinding[];
 };
 
 export type ConversationsResponse = {

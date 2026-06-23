@@ -1,13 +1,22 @@
 <script lang="ts">
   import EmptyState from '../components/common/EmptyState.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
-  import type { FeedbackStats, ReadyStatus, ReplyPreset, Session, User } from '../lib/types';
+  import ModelPicker from '../components/models/ModelPicker.svelte';
+  import type { FeedbackStats, Provider, ProviderModel, ReadyStatus, ReplyPreset, Session, User } from '../lib/types';
   import { strings } from '../strings';
 
   export let user: User;
   export let sessions: Session[] = [];
   export let status: ReadyStatus | null = null;
   export let feedbackStats: FeedbackStats = { positive: 0, negative: 0 };
+  export let providers: Provider[] = [];
+  export let providerModels: ProviderModel[] = [];
+  export let chatRoleProviderId = '';
+  export let chatRoleModel = '';
+  export let utilityRoleProviderId = '';
+  export let utilityRoleModel = '';
+  export let visionRoleProviderId = '';
+  export let visionRoleModel = '';
   export let replyPresets: ReplyPreset[] = [];
   export let replyPresetName = '';
   export let replyPresetDescription = '';
@@ -17,6 +26,7 @@
   export let onRevokeSession: (sessionId: string) => void | Promise<void>;
   export let onRefreshDiagnostics: () => void | Promise<void>;
   export let onRefreshFeedbackStats: () => void | Promise<void>;
+  export let onSaveModelRole: (role: 'chat' | 'utility' | 'vision', providerId: string, modelId: string) => void | Promise<void>;
   export let onCreateReplyPreset: () => void | Promise<void>;
   export let onToggleReplyPreset: (preset: ReplyPreset) => void | Promise<void>;
   export let onResetReplyPresets: () => void | Promise<void>;
@@ -75,6 +85,51 @@
         {/each}
       </div>
     {/if}
+  </section>
+
+  <section class="panel models-settings-panel" aria-labelledby="models-title">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Model platform</p>
+        <h2 id="models-title">Model defaults</h2>
+      </div>
+      <StatusPill status={`${providerModels.length} cached models`} tone="accent" />
+    </div>
+    <div class="model-role-grid">
+      <div class="model-role-card">
+        <div>
+          <h3>Chat Model</h3>
+          <p>Default for normal conversations and final user-facing answers.</p>
+        </div>
+        <ModelPicker bind:selectedModelId={chatRoleModel} bind:selectedProviderId={chatRoleProviderId} label="Chat model" models={providerModels} {providers} role="chat" />
+        <button on:click={() => onSaveModelRole('chat', chatRoleProviderId, chatRoleModel)} type="button">Save Chat Model</button>
+      </div>
+      <div class="model-role-card">
+        <div>
+          <h3>Utility Model</h3>
+          <p>Used for summaries, titles, reply drafts, and lightweight worker AI operations.</p>
+        </div>
+        <ModelPicker bind:selectedModelId={utilityRoleModel} bind:selectedProviderId={utilityRoleProviderId} label="Utility model" models={providerModels} {providers} role="utility" />
+        <button on:click={() => onSaveModelRole('utility', utilityRoleProviderId, utilityRoleModel)} type="button">Save Utility Model</button>
+      </div>
+      <div class="model-role-card">
+        <div>
+          <h3>Vision Model</h3>
+          <p>Configured now for future visual-understanding requests. Image generation is not implemented.</p>
+        </div>
+        <ModelPicker bind:selectedModelId={visionRoleModel} bind:selectedProviderId={visionRoleProviderId} label="Vision model" models={providerModels} {providers} role="vision" />
+        <button on:click={() => onSaveModelRole('vision', visionRoleProviderId, visionRoleModel)} type="button">Save Vision Model</button>
+      </div>
+    </div>
+    <div class="catalog-strip">
+      {#each providers as provider (provider.id)}
+        <article>
+          <strong>{provider.name}</strong>
+          <span>{provider.available_model_count ?? 0} available / {provider.model_count ?? 0} cached</span>
+          <small>{provider.model_refresh_state ?? 'idle'}</small>
+        </article>
+      {/each}
+    </div>
   </section>
 
   <section class="panel" aria-labelledby="diagnostics-title">
@@ -184,3 +239,51 @@
     </section>
   </section>
 </div>
+
+<style>
+  .models-settings-panel {
+    grid-column: 1 / -1;
+  }
+
+  .model-role-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: var(--space-4);
+  }
+
+  .model-role-card {
+    display: grid;
+    gap: var(--space-3);
+    border: 1px solid var(--color-border-muted);
+    border-radius: var(--radius-lg);
+    background: rgba(255, 255, 255, 0.025);
+    padding: var(--space-4);
+  }
+
+  .model-role-card p {
+    margin-bottom: 0;
+    font-size: var(--font-sm);
+  }
+
+  .catalog-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+  }
+
+  .catalog-strip article {
+    display: grid;
+    gap: 2px;
+    border: 1px solid var(--color-border-muted);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.02);
+    padding: var(--space-3);
+  }
+
+  .catalog-strip span,
+  .catalog-strip small {
+    color: var(--color-subtle);
+    font-size: var(--font-xs);
+  }
+</style>
