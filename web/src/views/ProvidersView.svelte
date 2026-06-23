@@ -1,5 +1,6 @@
 <script lang="ts">
   import EmptyState from '../components/common/EmptyState.svelte';
+  import Modal from '../components/common/Modal.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
   import ModelPicker from '../components/models/ModelPicker.svelte';
   import type { Provider, ProviderModel } from '../lib/types';
@@ -39,20 +40,43 @@
     ? providerModels.filter((model) => model.provider_id === editingProviderId)
     : [];
   $: editingProviderList = editingProviderId ? providers.filter((provider) => provider.id === editingProviderId) : [];
+
+  let formOpen = false;
+
+  $: if (editingProviderId) {
+    formOpen = true;
+  }
+
+  function openCreate(): void {
+    onCancelEdit();
+    formOpen = true;
+  }
+
+  function closeForm(): void {
+    onCancelEdit();
+    formOpen = false;
+  }
+
+  async function submitForm(): Promise<void> {
+    await onSubmit();
+    formOpen = false;
+  }
 </script>
 
-<section class="providers-layout">
-  <form class="panel form-grid" on:submit|preventDefault={onSubmit}>
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Infrastructure</p>
-        <h2>{editingProviderId ? 'Edit provider' : strings.providers.add}</h2>
-      </div>
-      {#if editingProviderId}
-        <button on:click={onCancelEdit} type="button">Cancel edit</button>
-      {/if}
+<section class="panel">
+  <div class="panel-heading">
+    <div>
+      <p class="eyebrow">Models and health</p>
+      <h2>{strings.providers.title}</h2>
     </div>
+    <div class="cluster">
+      <button on:click={onRefresh} type="button">Refresh</button>
+      <button on:click={openCreate} type="button">New provider</button>
+    </div>
+  </div>
 
+  <Modal open={formOpen} title={editingProviderId ? 'Edit provider' : strings.providers.add} onClose={closeForm}>
+  <form class="form-grid" on:submit|preventDefault={submitForm}>
     <div class="form-section">
       <h3>Connection</h3>
       <label>
@@ -136,15 +160,8 @@
       {editingProviderId ? 'Save provider' : strings.providers.add}
     </button>
   </form>
+  </Modal>
 
-  <section class="panel">
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Models and health</p>
-        <h2>{strings.providers.title}</h2>
-      </div>
-      <button on:click={onRefresh} type="button">Refresh</button>
-    </div>
     {#if providers.length === 0}
       <EmptyState
         description="Add a Bifrost or OpenAI-compatible provider before starting chat."
@@ -189,5 +206,4 @@
         {/each}
       </div>
     {/if}
-  </section>
 </section>

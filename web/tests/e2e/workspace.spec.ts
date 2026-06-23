@@ -101,6 +101,7 @@ async function visitPrimaryScreens(page: Page): Promise<void> {
 
 async function createProvider(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Providers' }).click();
+  await page.getByRole('button', { name: 'New provider' }).click();
   await page.getByLabel('Name', { exact: true }).fill('Mock Provider');
   await page.getByLabel('Base URL').fill('http://127.0.0.1:17011');
   await page.getByLabel('API key').fill('mock-key');
@@ -119,6 +120,7 @@ async function createProvider(page: Page): Promise<void> {
 
 async function createAgent(page: Page): Promise<string> {
   await page.getByRole('button', { name: 'Agents' }).click();
+  await page.getByRole('button', { name: 'New agent' }).click();
   await page.getByLabel('Name', { exact: true }).fill('E2E Agent');
   await page.getByLabel('Description').fill('Agent used by browser E2E.');
   await page.getByLabel('System prompt').fill('Use the selected memories and approved tools.');
@@ -132,6 +134,7 @@ async function createAgent(page: Page): Promise<string> {
 
 async function createMCPServerAndDiscoverTool(page: Page): Promise<{ serverId: string; toolId: string }> {
   await page.getByRole('button', { name: 'MCP' }).click();
+  await page.getByRole('button', { name: 'New MCP server' }).click();
   await page.getByLabel('Name', { exact: true }).fill('Mock MCP');
   await page.getByLabel('Description').fill('Mock MCP server.');
   await page.getByLabel('HTTP URL').fill('http://127.0.0.1:17012/mcp');
@@ -148,6 +151,7 @@ async function createMCPServerAndDiscoverTool(page: Page): Promise<{ serverId: s
 
 async function createMemory(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Memories' }).click();
+  await page.getByRole('button', { name: 'New memory' }).click();
   await page.getByLabel('Title').fill('Preferred name');
   await page.getByLabel('Content').fill('The user prefers to be called Yuri.');
   await page.getByLabel('Tags').fill('identity, preference');
@@ -157,6 +161,7 @@ async function createMemory(page: Page): Promise<void> {
 
 async function createAndRunTask(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Tasks' }).click();
+  await page.getByRole('button', { name: 'New task' }).click();
   await page.getByLabel('Name', { exact: true }).fill('E2E task');
   await page.getByLabel('Type').selectOption('agent');
   await page.getByLabel('Prompt').fill('Use approval tool to check API status.');

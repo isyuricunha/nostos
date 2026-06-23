@@ -1,5 +1,6 @@
 <script lang="ts">
   import EmptyState from '../components/common/EmptyState.svelte';
+  import Modal from '../components/common/Modal.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
   import ModelPicker from '../components/models/ModelPicker.svelte';
   import type { Agent, Provider, ProviderModel } from '../lib/types';
@@ -27,20 +28,43 @@
   export let onEdit: (agent: Agent) => void;
   export let onDuplicate: (agentId: string) => void | Promise<void>;
   export let onDelete: (agentId: string) => void | Promise<void>;
+
+  let formOpen = false;
+
+  $: if (editingAgentId) {
+    formOpen = true;
+  }
+
+  function openCreate(): void {
+    onCancelEdit();
+    formOpen = true;
+  }
+
+  function closeForm(): void {
+    onCancelEdit();
+    formOpen = false;
+  }
+
+  async function submitForm(): Promise<void> {
+    await onSubmit();
+    formOpen = false;
+  }
 </script>
 
-<section class="providers-layout">
-  <form class="panel form-grid" on:submit|preventDefault={onSubmit}>
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Runtime identity</p>
-        <h2>{editingAgentId ? 'Edit agent' : strings.agents.add}</h2>
-      </div>
-      {#if editingAgentId}
-        <button on:click={onCancelEdit} type="button">Cancel edit</button>
-      {/if}
+<section class="panel">
+  <div class="panel-heading">
+    <div>
+      <p class="eyebrow">Assistants</p>
+      <h2>Agents</h2>
     </div>
+    <div class="cluster">
+      <button on:click={onRefresh} type="button">Refresh</button>
+      <button on:click={openCreate} type="button">New agent</button>
+    </div>
+  </div>
 
+  <Modal open={formOpen} title={editingAgentId ? 'Edit agent' : strings.agents.add} onClose={closeForm}>
+  <form class="form-grid" on:submit|preventDefault={submitForm}>
     <div class="form-section">
       <h3>Basic identity</h3>
       <label>
@@ -121,45 +145,37 @@
 
     <button type="submit">{editingAgentId ? 'Save agent' : strings.agents.add}</button>
   </form>
+  </Modal>
 
-  <section class="panel">
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Assistants</p>
-        <h2>Agents</h2>
-      </div>
-      <button on:click={onRefresh} type="button">Refresh</button>
+  {#if agents.length === 0}
+    <EmptyState description="Create a focused assistant profile for chat and scheduled work." title={strings.agents.noAgents} />
+  {:else}
+    <div class="table-list agent-cards">
+      {#each agents as agent (agent.id)}
+        <article>
+          <div>
+            <div class="split">
+              <strong>{agent.name}</strong>
+              <StatusPill status={agent.active ? 'active' : 'disabled'} tone={agent.active ? 'success' : 'neutral'} />
+            </div>
+            <span>{agent.description || 'No description'}</span>
+            <span>{agent.memory_access_mode} memory / tools {agent.tool_permission_default}</span>
+            <span>max iterations {agent.max_tool_iterations} / temperature {agent.temperature}</span>
+            {#if agent.default_provider_id || agent.default_model || agent.fallback_model}
+              <span>
+                {agent.default_provider_id ? 'provider configured' : ''}
+                {agent.default_model ? ` / default ${agent.default_model}` : ''}
+                {agent.fallback_model ? ` / fallback ${agent.fallback_model}` : ''}
+              </span>
+            {/if}
+          </div>
+          <div>
+            <button on:click={() => onEdit(agent)} type="button">Edit</button>
+            <button on:click={() => onDuplicate(agent.id)} type="button">{strings.agents.duplicate}</button>
+            <button on:click={() => onDelete(agent.id)} type="button">Delete</button>
+          </div>
+        </article>
+      {/each}
     </div>
-    {#if agents.length === 0}
-      <EmptyState description="Create a focused assistant profile for chat and scheduled work." title={strings.agents.noAgents} />
-    {:else}
-      <div class="table-list agent-cards">
-        {#each agents as agent (agent.id)}
-          <article>
-            <div>
-              <div class="split">
-                <strong>{agent.name}</strong>
-                <StatusPill status={agent.active ? 'active' : 'disabled'} tone={agent.active ? 'success' : 'neutral'} />
-              </div>
-              <span>{agent.description || 'No description'}</span>
-              <span>{agent.memory_access_mode} memory / tools {agent.tool_permission_default}</span>
-              <span>max iterations {agent.max_tool_iterations} / temperature {agent.temperature}</span>
-              {#if agent.default_provider_id || agent.default_model || agent.fallback_model}
-                <span>
-                  {agent.default_provider_id ? 'provider configured' : ''}
-                  {agent.default_model ? ` / default ${agent.default_model}` : ''}
-                  {agent.fallback_model ? ` / fallback ${agent.fallback_model}` : ''}
-                </span>
-              {/if}
-            </div>
-            <div>
-              <button on:click={() => onEdit(agent)} type="button">Edit</button>
-              <button on:click={() => onDuplicate(agent.id)} type="button">{strings.agents.duplicate}</button>
-              <button on:click={() => onDelete(agent.id)} type="button">Delete</button>
-            </div>
-          </article>
-        {/each}
-      </div>
-    {/if}
-  </section>
+  {/if}
 </section>

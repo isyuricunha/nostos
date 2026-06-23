@@ -1,5 +1,6 @@
 <script lang="ts">
   import EmptyState from '../components/common/EmptyState.svelte';
+  import Modal from '../components/common/Modal.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
   import type { MCPServer, MCPTool } from '../lib/types';
   import { strings } from '../strings';
@@ -29,6 +30,27 @@
   export let onTest: (serverId: string) => void | Promise<void>;
   export let onUpdateToolPermission: (toolId: string, permissionMode: string) => void | Promise<void>;
 
+  let formOpen = false;
+
+  $: if (editingMCPServerId) {
+    formOpen = true;
+  }
+
+  function openCreate(): void {
+    onCancelEdit();
+    formOpen = true;
+  }
+
+  function closeForm(): void {
+    onCancelEdit();
+    formOpen = false;
+  }
+
+  async function submitForm(): Promise<void> {
+    await onSubmit();
+    formOpen = false;
+  }
+
   function healthTone(server: MCPServer): 'success' | 'warning' | 'danger' | 'neutral' {
     if (!server.enabled) return 'neutral';
     if (server.health_status === 'healthy') return 'success';
@@ -37,18 +59,20 @@
   }
 </script>
 
-<section class="providers-layout">
-  <form class="panel form-grid" on:submit|preventDefault={onSubmit}>
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Tool bridge</p>
-        <h2>{editingMCPServerId ? 'Edit MCP server' : strings.mcp.add}</h2>
-      </div>
-      {#if editingMCPServerId}
-        <button on:click={onCancelEdit} type="button">Cancel edit</button>
-      {/if}
+<section class="panel">
+  <div class="panel-heading">
+    <div>
+      <p class="eyebrow">Connected tools</p>
+      <h2>MCP servers</h2>
     </div>
+    <div class="cluster">
+      <button on:click={onRefresh} type="button">Refresh</button>
+      <button on:click={openCreate} type="button">New MCP server</button>
+    </div>
+  </div>
 
+  <Modal open={formOpen} title={editingMCPServerId ? 'Edit MCP server' : strings.mcp.add} onClose={closeForm}>
+  <form class="form-grid" on:submit|preventDefault={submitForm}>
     <div class="form-section">
       <h3>Identity</h3>
       <label>
@@ -124,15 +148,8 @@
 
     <button type="submit">{editingMCPServerId ? 'Save MCP server' : strings.mcp.add}</button>
   </form>
+  </Modal>
 
-  <section class="panel">
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Connected tools</p>
-        <h2>MCP servers</h2>
-      </div>
-      <button on:click={onRefresh} type="button">Refresh</button>
-    </div>
     {#if mcpServers.length === 0}
       <EmptyState description="Connect local stdio or HTTP MCP servers to expose approved tools." title={strings.mcp.noServers} />
     {:else}
@@ -200,5 +217,4 @@
         {/each}
       </div>
     {/if}
-  </section>
 </section>

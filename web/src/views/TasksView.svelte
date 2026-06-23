@@ -1,5 +1,6 @@
 <script lang="ts">
   import EmptyState from '../components/common/EmptyState.svelte';
+  import Modal from '../components/common/Modal.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
   import ModelPicker from '../components/models/ModelPicker.svelte';
   import type { Agent, Provider, ProviderModel, TaskRecord, TaskRun, TaskRunEvent, TaskToolCall } from '../lib/types';
@@ -41,6 +42,27 @@
   export let onShowEvents: (runId: string) => void | Promise<void>;
   export let taskNameForRun: (run: TaskRun) => string;
 
+  let formOpen = false;
+
+  $: if (editingTaskId) {
+    formOpen = true;
+  }
+
+  function openCreate(): void {
+    onCancelEdit();
+    formOpen = true;
+  }
+
+  function closeForm(): void {
+    onCancelEdit();
+    formOpen = false;
+  }
+
+  async function submitForm(): Promise<void> {
+    await onSubmit();
+    formOpen = false;
+  }
+
   function runTone(state: string): 'success' | 'warning' | 'danger' | 'neutral' | 'accent' {
     if (state === 'succeeded') return 'success';
     if (state === 'failed' || state === 'timed_out') return 'danger';
@@ -49,18 +71,20 @@
   }
 </script>
 
-<section class="providers-layout">
-  <form class="panel form-grid" on:submit|preventDefault={onSubmit}>
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Automation</p>
-        <h2>{editingTaskId ? 'Edit task' : strings.tasks.add}</h2>
-      </div>
-      {#if editingTaskId}
-        <button on:click={onCancelEdit} type="button">Cancel edit</button>
-      {/if}
+<section class="panel">
+  <div class="panel-heading">
+    <div>
+      <p class="eyebrow">Operations</p>
+      <h2>Tasks</h2>
     </div>
+    <div class="cluster">
+      <button on:click={onRefresh} type="button">Refresh</button>
+      <button on:click={openCreate} type="button">New task</button>
+    </div>
+  </div>
 
+  <Modal open={formOpen} title={editingTaskId ? 'Edit task' : strings.tasks.add} onClose={closeForm}>
+  <form class="form-grid" on:submit|preventDefault={submitForm}>
     <div class="form-section">
       <h3>Identity</h3>
       <label>
@@ -173,15 +197,8 @@
 
     <button disabled={submitting} type="submit">{editingTaskId ? 'Save task' : strings.tasks.add}</button>
   </form>
+  </Modal>
 
-  <section class="panel">
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Operations</p>
-        <h2>Tasks</h2>
-      </div>
-      <button on:click={onRefresh} type="button">Refresh</button>
-    </div>
     {#if taskRecords.length === 0}
       <EmptyState description="Manual, scheduled, and system tasks will appear here." title={strings.tasks.noTasks} />
     {:else}
@@ -296,5 +313,4 @@
         {/each}
       </div>
     {/if}
-  </section>
 </section>
