@@ -1,14 +1,41 @@
 services:
   app:
     image: nostos:latest
+    pull_policy: build
+    build:
+      context: .
+      args:
+        VERSION: ${APP_VERSION:-0.1.0}
+        BUILD_COMMIT: ${BUILD_COMMIT:-development}
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-development}
     command: ["server"]
     restart: unless-stopped
     env_file:
       - path: .env
         required: false
     environment:
+      APP_ENV: ${APP_ENV:-production}
       APP_HOST: 0.0.0.0
       APP_PORT: 7000
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:7000}
+      APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-info}
+      DATABASE_DRIVER: ${DATABASE_DRIVER:-postgres}
+      DATABASE_URL: ${DATABASE_URL:-}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-}
+      APP_SESSION_SECRET: ${APP_SESSION_SECRET:-}
+      APP_BOOTSTRAP_EMAIL: ${APP_BOOTSTRAP_EMAIL:-}
+      APP_BOOTSTRAP_PASSWORD: ${APP_BOOTSTRAP_PASSWORD:-}
+      SECURE_COOKIES: ${SECURE_COOKIES:-false}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      SESSION_TTL: ${SESSION_TTL:-720h}
+      TASK_RUN_RETENTION: ${TASK_RUN_RETENTION:-720h}
+      AUDIT_LOG_RETENTION: ${AUDIT_LOG_RETENTION:-2160h}
+      CHAT_DEFAULT_TIMEOUT: ${CHAT_DEFAULT_TIMEOUT:-5m}
+      CHAT_MAX_TOOL_ITERATIONS: ${CHAT_MAX_TOOL_ITERATIONS:-8}
+      CHAT_CONTEXT_THRESHOLD: ${CHAT_CONTEXT_THRESHOLD:-60000}
+      CHAT_RECENT_MESSAGE_LIMIT: ${CHAT_RECENT_MESSAGE_LIMIT:-30}
       DATA_DIR: /data
       MIGRATIONS_DIR: /migrations
       WEB_DIST_DIR: /web/dist
@@ -32,12 +59,40 @@ services:
 
   worker:
     image: nostos:latest
+    pull_policy: build
+    build:
+      context: .
+      args:
+        VERSION: ${APP_VERSION:-0.1.0}
+        BUILD_COMMIT: ${BUILD_COMMIT:-development}
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-development}
     command: ["worker"]
     restart: unless-stopped
     env_file:
       - path: .env
         required: false
     environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:7000}
+      APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-info}
+      DATABASE_DRIVER: ${DATABASE_DRIVER:-postgres}
+      DATABASE_URL: ${DATABASE_URL:-}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-}
+      APP_SESSION_SECRET: ${APP_SESSION_SECRET:-}
+      SECURE_COOKIES: ${SECURE_COOKIES:-false}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2s}
+      TASK_DEFAULT_TIMEOUT: ${TASK_DEFAULT_TIMEOUT:-10m}
+      TASK_MAX_RETRIES: ${TASK_MAX_RETRIES:-3}
+      TASK_RUN_RETENTION: ${TASK_RUN_RETENTION:-720h}
+      AUDIT_LOG_RETENTION: ${AUDIT_LOG_RETENTION:-2160h}
+      CHAT_DEFAULT_TIMEOUT: ${CHAT_DEFAULT_TIMEOUT:-5m}
+      CHAT_MAX_TOOL_ITERATIONS: ${CHAT_MAX_TOOL_ITERATIONS:-8}
+      CHAT_CONTEXT_THRESHOLD: ${CHAT_CONTEXT_THRESHOLD:-60000}
+      CHAT_RECENT_MESSAGE_LIMIT: ${CHAT_RECENT_MESSAGE_LIMIT:-30}
       DATA_DIR: /data
       MIGRATIONS_DIR: /migrations
       WEB_DIST_DIR: /web/dist

@@ -1,4 +1,8 @@
 SHELL := /usr/bin/env bash
+VERSION ?= 0.1.0
+BUILD_COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo development)
+BUILD_TIMESTAMP ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+GO_LDFLAGS := -X main.version=$(VERSION) -X main.buildCommit=$(BUILD_COMMIT) -X main.buildTimestamp=$(BUILD_TIMESTAMP)
 
 .PHONY: dev dev-web dev-server dev-worker build test test-go test-web test-integration lint format migrate docker-build docker-up docker-up-local-db docker-up-sqlite docker-down doctor
 
@@ -16,7 +20,7 @@ dev-worker:
 
 build:
 	pnpm --dir web build
-	go build ./cmd/app
+	go build -ldflags "$(GO_LDFLAGS)" ./cmd/app
 
 test: test-go test-web
 
@@ -42,19 +46,24 @@ migrate:
 	go run ./cmd/app migrate
 
 docker-build:
-	docker build -t nostos:latest .
+	docker build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg BUILD_COMMIT=$(BUILD_COMMIT) \
+		--build-arg BUILD_TIMESTAMP=$(BUILD_TIMESTAMP) \
+		-t nostos:$(VERSION) \
+		-t nostos:latest .
 
 docker-up:
-	docker compose -f compose.yaml up -d
+	BUILD_COMMIT=$(BUILD_COMMIT) BUILD_TIMESTAMP=$(BUILD_TIMESTAMP) docker compose -f compose.yaml up -d --build
 
 docker-up-local-db:
-	docker compose -f compose.yaml -f compose.local-db.yaml up -d
+	BUILD_COMMIT=$(BUILD_COMMIT) BUILD_TIMESTAMP=$(BUILD_TIMESTAMP) docker compose -f compose.yaml -f compose.local-db.yaml up -d --build
 
 docker-up-sqlite:
-	docker compose -f compose.yaml -f compose.sqlite.yaml up -d
+	BUILD_COMMIT=$(BUILD_COMMIT) BUILD_TIMESTAMP=$(BUILD_TIMESTAMP) docker compose -f compose.yaml -f compose.sqlite.yaml up -d --build
 
 docker-down:
 	docker compose -f compose.yaml -f compose.local-db.yaml -f compose.sqlite.yaml down
 
 doctor:
-	go run ./cmd/app doctor
+	go run -ldflags "$(GO_LDFLAGS)" ./cmd/app doctor

@@ -19,8 +19,8 @@ COPY cmd cmd
 COPY internal internal
 COPY migrations migrations
 ARG VERSION=0.1.0
-ARG BUILD_COMMIT=unknown
-ARG BUILD_TIMESTAMP=unknown
+ARG BUILD_COMMIT=development
+ARG BUILD_TIMESTAMP=development
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -trimpath \
     -ldflags "-s -w -X main.version=${VERSION} -X main.buildCommit=${BUILD_COMMIT} -X main.buildTimestamp=${BUILD_TIMESTAMP}" \
