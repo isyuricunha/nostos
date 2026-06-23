@@ -23,6 +23,16 @@ Global model roles are stored per workspace:
 
 Each role supports an ordered list of provider/model entries. Resolution uses the first configured entry with an enabled provider and usable credentials. If no role binding exists, legacy provider defaults are used as a compatibility fallback.
 
+The Settings screen exposes three entries for each role:
+
+```text
+primary
+fallback 1
+fallback 2
+```
+
+Each entry preserves both the provider and the full model ID, so two providers exposing the same model string remain distinct choices.
+
 ## Catalog Cache
 
 Provider models are cached in `provider_models`. Model pickers read from this database cache instead of calling `/v1/models` on every open.
@@ -55,6 +65,8 @@ MODEL_REFRESH_TIMEOUT=60s
 
 The accepted range is `1s` through `300s`. Provider request timeouts still apply to chat and health operations; model refresh can use the larger dedicated timeout.
 
+The frontend loads up to 1,000 cached model rows for picker use and renders a capped, searchable result set instead of placing every row in the DOM at once.
+
 ## Capabilities
 
 Cached models store lightweight capabilities:
@@ -74,3 +86,5 @@ Capabilities may come from heuristics, provider metadata, manual overrides, or f
 ## Manual Models
 
 Manual models can be added when a provider does not expose `/v1/models` or omits a usable model. Manual entries remain provider-scoped and can be selected in the same picker as API-discovered models.
+
+Provider creation still allows manual default and fallback model IDs before the provider exists in the catalog. After the provider is saved and models are refreshed, provider editing uses the same provider-scoped picker as chat, agents, tasks, and settings.

@@ -1,5 +1,26 @@
 # Chat-First Model Platform Plan
 
+Last updated: 2026-06-23
+
+## Current Branch Audit
+
+The branch `feat/chat-first-model-platform` is not documentation-only. It already contains these implementation commits on top of `v0.1.0`:
+
+- `efc3fdd feat(models): add cached provider model platform`
+- `701b8c5 refactor(web): make chat the primary workspace`
+- `fc0afb7 test(e2e): cover large cached model catalogs`
+- `af2208b docs(models): document chat-first model platform`
+
+The current audit confirms that the branch has backend model-catalog migrations, model role APIs, a first version of the chat-first shell, a reusable `ModelPicker`, and E2E coverage for an 800-model mock catalog.
+
+Remaining gaps found during this audit:
+
+- Settings exposes only the primary model for each role; ordered fallback chains are persisted in the backend but not fully editable in the UI.
+- Agents, Tasks, and Providers still contain raw model text fields in several places instead of the reusable model picker.
+- The frontend catalog request loads only 500 models, which is below the 800-1,000 model target.
+- E2E coverage still depends on raw model inputs in the agent flow.
+- Provider creation must still allow manual model IDs before the provider exists in the catalog, but provider editing should use the model picker once cached models are available.
+
 ## Current Architecture
 
 Nostos v0.1.0 is a single Go binary with `server`, `worker`, `migrate`, `doctor`, and `version` commands. The Svelte SPA is compiled into the runtime image and served by the Go server. PostgreSQL and SQLite share explicit migrations under `migrations/`.
@@ -83,12 +104,12 @@ Migration compatibility:
 ## Frontend Component Plan
 
 - Add a reusable `ModelPicker.svelte` component with provider grouping, search, full ID display, keyboard navigation, manual entry, capability badges, and unavailable markers.
-- Add Settings model defaults and catalog management sections.
+- Add Settings model defaults and catalog management sections with primary, fallback 1, and fallback 2 entries for chat, utility, and vision roles.
 - Refactor the app shell so the primary sidebar contains New Chat, conversation search, recent conversations, compact shortcuts, and the owner menu.
 - Remove the permanent conversation rail from `ChatView`.
 - Move chat provider/model/agent controls into a compact conversation toolbar/composer control row.
 - Move message secondary actions into a compact menu and add message details display.
-- Keep providers, agents, tasks, and settings functional while progressively replacing raw model inputs with the model picker.
+- Replace model selection in Agents, Tasks, Settings, and provider editing with the shared model picker while preserving manual model entry for unsaved provider creation.
 
 ## Backward Compatibility Plan
 
@@ -107,8 +128,9 @@ Migration compatibility:
 5. Add the reusable frontend model picker and settings model defaults.
 6. Convert chat to a chat-first shell with conversations in the primary sidebar.
 7. Move message secondary actions into menus and add message details.
-8. Add E2E coverage for large catalogs and chat-first model selection.
-9. Update documentation and run validation.
+8. Complete picker usage in Agents, Tasks, provider editing, and settings fallback chains.
+9. Add E2E coverage for large catalogs and chat-first model selection.
+10. Update documentation and run validation.
 
 ## Test Plan
 
