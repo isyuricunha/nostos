@@ -119,4 +119,53 @@ describe('ModelPicker', () => {
 
     expect(screen.getByRole('button', { name: /Kimi K2.6/ })).toBeTruthy();
   });
+
+  it('supports Home and End keyboard navigation', async () => {
+    render(ModelPicker, { label: 'Chat model', providers, models, role: 'chat' });
+
+    await fireEvent.click(screen.getByRole('button', { name: /select model/i }));
+    let dialog = screen.getByRole('dialog', { name: 'Chat model picker' });
+
+    await fireEvent.keyDown(dialog, { key: 'End' });
+    await fireEvent.keyDown(dialog, { key: 'Enter' });
+
+    expect(screen.getByRole('button', { name: /GPT OSS Direct/ })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: /GPT OSS Direct/ }));
+    dialog = screen.getByRole('dialog', { name: 'Chat model picker' });
+
+    await fireEvent.keyDown(dialog, { key: 'Home' });
+    await fireEvent.keyDown(dialog, { key: 'Enter' });
+
+    expect(screen.getByRole('button', { name: /GPT OSS 120B/ })).toBeTruthy();
+  });
+
+  it('renders large model catalogs incrementally instead of truncating results', async () => {
+    const largeCatalog: ProviderModel[] = Array.from({ length: 125 }, (_, index) => ({
+      id: `model_large_${index}`,
+      workspace_id: 'workspace_1',
+      provider_id: 'provider_bifrost',
+      provider_name: 'Bifrost',
+      model_id: `NVIDIA NIM/vendor/model-${index.toString().padStart(3, '0')}`,
+      display_name: `Large Model ${index.toString().padStart(3, '0')}`,
+      enabled: true,
+      available: true,
+      manually_added: false,
+      capabilities: ['chat']
+    }));
+
+    render(ModelPicker, { label: 'Chat model', providers, models: largeCatalog, role: 'chat' });
+
+    await fireEvent.click(screen.getByRole('button', { name: /select model/i }));
+    const dialog = screen.getByRole('dialog', { name: 'Chat model picker' });
+
+    expect(within(dialog).getByText('125 matches')).toBeTruthy();
+    expect(within(dialog).getByText('showing 80')).toBeTruthy();
+    expect(within(dialog).getAllByRole('option')).toHaveLength(80);
+
+    await fireEvent.click(within(dialog).getByRole('button', { name: /Load more/ }));
+
+    expect(within(dialog).getAllByRole('option')).toHaveLength(125);
+    expect(within(dialog).getByText('Large Model 124')).toBeTruthy();
+  });
 });

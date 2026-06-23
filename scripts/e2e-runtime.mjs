@@ -63,6 +63,10 @@ const provider = createServer(async (request, response) => {
       streamText(response, 'Tool-assisted answer from the mock provider.');
       return;
     }
+    if (text.includes('Give me a short status update.')) {
+      await streamTextSlow(response, 'Working through the current status update.');
+      return;
+    }
     if (text.includes('What is my name?') && text.includes('My name is Yuri.')) {
       streamText(response, 'Your name is Yuri.');
       return;
@@ -165,6 +169,15 @@ process.on('SIGINT', shutdown);
 
 function streamText(response, text) {
   response.write(`data: {"choices":[{"delta":{"content":${JSON.stringify(text)}}}]}\n\n`);
+  response.write('data: [DONE]\n\n');
+  response.end();
+}
+
+async function streamTextSlow(response, text) {
+  for (const chunk of text.match(/.{1,12}/g) ?? [text]) {
+    response.write(`data: {"choices":[{"delta":{"content":${JSON.stringify(chunk)}}}]}\n\n`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
   response.write('data: [DONE]\n\n');
   response.end();
 }

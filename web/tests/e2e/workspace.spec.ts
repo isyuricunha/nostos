@@ -69,10 +69,10 @@ test('owner workspace release flow', async ({ page }) => {
   await page.getByRole('button', { name: 'Useful' }).first().click();
   await page.getByLabel('Negative feedback reason').first().selectOption('Too long');
   await page.getByRole('button', { name: 'Needs work' }).first().click();
-  await openFirstMessageActions(page, 'Regenerate from here');
+  await openFirstMessageActions(page, 'Regenerate from here', 'assistant');
   await expect(page.getByText('Regeneration instruction')).toHaveCount(0);
 
-  await openFirstMessageActions(page, 'Use as reply source');
+  await openFirstMessageActions(page, 'Use as reply source', 'user');
   await page.getByLabel('Preset').selectOption({ label: 'Negative' });
   await page.getByRole('button', { name: 'Generate draft' }).click();
   await expect(page.getByLabel('Generated reply draft')).toHaveValue(/Not really/);
@@ -84,7 +84,7 @@ test('owner workspace release flow', async ({ page }) => {
   await sendChat(page, 'Please use the approval tool to check API status.');
   await expect(page.getByText('lookup_status', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Approve once' }).click();
-  await expect(page.getByText('Tool-assisted answer from the mock provider.')).toBeVisible();
+  await expect(page.getByText('Tool-assisted answer from the mock provider.').first()).toBeVisible();
 
   await api(page, `/api/v1/agents/${agentId}/mcp-tools/${toolId}/permission`, 'PUT', { permission_mode: 'allow' });
   await createAndRunTask(page);
@@ -92,7 +92,7 @@ test('owner workspace release flow', async ({ page }) => {
   await openNav(page, 'Chat');
   await page.getByRole('button', { name: /Conversation menu:/ }).click();
   await page.getByRole('button', { name: 'Regenerate summary' }).click();
-  await expect(page.getByText(/Conversation summary regeneration queued|Conversation summary is already queued/)).toBeVisible();
+  await expect(page.getByText(/Conversation summary regeneration queued|Conversation summary is already queued/).first()).toBeVisible();
 
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'System' }).click();
@@ -130,9 +130,9 @@ async function createProvider(page: Page): Promise<void> {
   const row = settingsDialog.locator('article').filter({ hasText: 'Mock Provider' }).first();
   await expect(row).toBeVisible();
   await row.getByRole('button', { name: 'Test' }).click();
-  await expect(page.getByText('Provider connection succeeded.')).toBeVisible();
+  await expect(page.getByText('Provider connection succeeded.').first()).toBeVisible();
   await row.getByRole('button', { name: 'Refresh models' }).click();
-  await expect(page.getByText('Models refreshed.')).toBeVisible();
+  await expect(page.getByText('Models refreshed.').first()).toBeVisible();
   await page.getByRole('button', { name: 'AI Defaults' }).click();
   await selectModel(page, 'Chat primary model', 'e2e-model');
   await page.getByRole('button', { name: 'Save Chat Chain' }).click();
@@ -229,8 +229,10 @@ async function selectModel(page: Page, label: string, modelId: string): Promise<
   await page.getByRole('option', { name: new RegExp(modelId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) }).first().click();
 }
 
-async function openFirstMessageActions(page: Page, actionName: string): Promise<void> {
-  const menus = page.getByRole('button', { name: 'Message menu' });
+async function openFirstMessageActions(page: Page, actionName: string, role: 'any' | 'assistant' | 'user' = 'any'): Promise<void> {
+  const scope =
+    role === 'assistant' ? page.locator('.chat-message.assistant') : role === 'user' ? page.locator('.chat-message.user') : page.locator('.chat-message');
+  const menus = scope.getByRole('button', { name: 'Message menu' });
   const count = await menus.count();
   for (let index = 0; index < count; index += 1) {
     await menus.nth(index).click();

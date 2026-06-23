@@ -61,6 +61,29 @@ describe('AppShell', () => {
     expect(within(menu).getByRole('button', { name: /Delete/ })).toBeTruthy();
   });
 
+  it('closes the conversation menu on outside click and Escape', async () => {
+    render(AppShell, {
+      activeView: strings.nav.chat,
+      navItems: [strings.nav.chat, strings.nav.memories, strings.nav.tasks],
+      user,
+      conversations,
+      selectedConversationId: 'conversation_beta',
+      ...callbacks
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Conversation menu for Beta launch' }));
+    expect(screen.getByRole('menu')).toBeTruthy();
+
+    await fireEvent.click(document.body);
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Conversation menu for Beta launch' }));
+    expect(screen.getByRole('menu')).toBeTruthy();
+
+    await fireEvent.keyDown(screen.getByRole('option', { name: /Beta launch/ }), { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
   it('opens the mobile drawer state from the navigation button', async () => {
     const { container } = render(AppShell, {
       activeView: strings.nav.chat,
