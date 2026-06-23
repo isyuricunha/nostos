@@ -1,7 +1,8 @@
 <script lang="ts">
   import EmptyState from '../components/common/EmptyState.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
-  import type { Agent, Provider, TaskRecord, TaskRun, TaskRunEvent, TaskToolCall } from '../lib/types';
+  import ModelPicker from '../components/models/ModelPicker.svelte';
+  import type { Agent, Provider, ProviderModel, TaskRecord, TaskRun, TaskRunEvent, TaskToolCall } from '../lib/types';
   import { strings } from '../strings';
 
   export let taskRecords: TaskRecord[] = [];
@@ -10,6 +11,7 @@
   export let taskRunToolCalls: TaskToolCall[] = [];
   export let agents: Agent[] = [];
   export let providers: Provider[] = [];
+  export let providerModels: ProviderModel[] = [];
   export let editingTaskId = '';
   export let taskName = '';
   export let taskDescription = '';
@@ -102,19 +104,14 @@
             {/each}
           </select>
         </label>
-        <label>
-          Provider override
-          <select bind:value={taskProviderId}>
-            <option value="">Agent/default provider</option>
-            {#each providers as provider (provider.id)}
-              <option value={provider.id}>{provider.name}</option>
-            {/each}
-          </select>
-        </label>
-        <label>
-          Model override
-          <input bind:value={taskModel} />
-        </label>
+        <ModelPicker
+          bind:selectedModelId={taskModel}
+          bind:selectedProviderId={taskProviderId}
+          label="Task model override"
+          models={providerModels}
+          {providers}
+          role="utility"
+        />
       </div>
     {/if}
 

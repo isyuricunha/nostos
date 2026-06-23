@@ -1,11 +1,13 @@
 <script lang="ts">
   import EmptyState from '../components/common/EmptyState.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
-  import type { Agent, Provider } from '../lib/types';
+  import ModelPicker from '../components/models/ModelPicker.svelte';
+  import type { Agent, Provider, ProviderModel } from '../lib/types';
   import { strings } from '../strings';
 
   export let agents: Agent[] = [];
   export let providers: Provider[] = [];
+  export let providerModels: ProviderModel[] = [];
   export let editingAgentId = '';
   export let agentName = '';
   export let agentDescription = '';
@@ -65,23 +67,23 @@
 
     <div class="form-section">
       <h3>Provider and model</h3>
-      <label>
-        Default provider
-        <select bind:value={agentDefaultProviderId}>
-          <option value="">No default provider</option>
-          {#each providers as provider (provider.id)}
-            <option value={provider.id}>{provider.name}</option>
-          {/each}
-        </select>
-      </label>
-      <label>
-        Default model
-        <input bind:value={agentDefaultModel} />
-      </label>
-      <label>
-        Fallback model
-        <input bind:value={agentFallbackModel} />
-      </label>
+      <ModelPicker
+        bind:selectedModelId={agentDefaultModel}
+        bind:selectedProviderId={agentDefaultProviderId}
+        label="Agent default model"
+        models={providerModels}
+        {providers}
+        role="chat"
+      />
+      <ModelPicker
+        bind:selectedModelId={agentFallbackModel}
+        bind:selectedProviderId={agentDefaultProviderId}
+        fixedProviderId={agentDefaultProviderId}
+        label="Agent fallback model"
+        models={providerModels}
+        {providers}
+        role="chat"
+      />
     </div>
 
     <div class="form-section">

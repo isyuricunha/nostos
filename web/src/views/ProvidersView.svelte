@@ -1,10 +1,12 @@
 <script lang="ts">
   import EmptyState from '../components/common/EmptyState.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
-  import type { Provider } from '../lib/types';
+  import ModelPicker from '../components/models/ModelPicker.svelte';
+  import type { Provider, ProviderModel } from '../lib/types';
   import { strings } from '../strings';
 
   export let providers: Provider[] = [];
+  export let providerModels: ProviderModel[] = [];
   export let editingProviderId = '';
   export let providerName = '';
   export let providerBaseUrl = '';
@@ -32,6 +34,11 @@
     if (provider.health_status === 'unhealthy') return 'danger';
     return 'warning';
   }
+
+  $: editingProviderModels = editingProviderId
+    ? providerModels.filter((model) => model.provider_id === editingProviderId)
+    : [];
+  $: editingProviderList = editingProviderId ? providers.filter((provider) => provider.id === editingProviderId) : [];
 </script>
 
 <section class="providers-layout">
@@ -93,14 +100,36 @@
 
     <div class="form-section">
       <h3>Model defaults</h3>
-      <label>
-        Default model
-        <input bind:value={providerDefaultModel} placeholder="gpt-4.1-mini" />
-      </label>
-      <label>
-        Fallback model
-        <input bind:value={providerFallbackModel} />
-      </label>
+      {#if editingProviderId}
+        <ModelPicker
+          bind:selectedModelId={providerDefaultModel}
+          selectedProviderId={editingProviderId}
+          fixedProviderId={editingProviderId}
+          label="Provider default model"
+          models={editingProviderModels}
+          providers={editingProviderList}
+          role="chat"
+        />
+        <ModelPicker
+          bind:selectedModelId={providerFallbackModel}
+          selectedProviderId={editingProviderId}
+          fixedProviderId={editingProviderId}
+          label="Provider fallback model"
+          models={editingProviderModels}
+          providers={editingProviderList}
+          role="chat"
+        />
+      {:else}
+        <p>Enter manual model IDs now. After saving and refreshing the catalog, edit the provider to choose from cached models.</p>
+        <label>
+          Default model
+          <input bind:value={providerDefaultModel} placeholder="gpt-4.1-mini" />
+        </label>
+        <label>
+          Fallback model
+          <input bind:value={providerFallbackModel} />
+        </label>
+      {/if}
     </div>
 
     <button disabled={submitting} type="submit">

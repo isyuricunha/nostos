@@ -36,10 +36,11 @@
     MemorySnippet,
     Message,
     MessageFeedback,
-    ModelRefreshResponse,
-    ModelRolesResponse,
-    ModelRoleBinding,
-    MessagesResponse,
+	    ModelRefreshResponse,
+	    ModelRolesResponse,
+	    ModelRoleBinding,
+	    ModelRoleDraft,
+	    MessagesResponse,
     ModelsResponse,
     Provider,
     ProviderModel,
@@ -112,12 +113,9 @@
   let selectedAgentId = '';
   let selectedProviderId = '';
   let selectedModel = '';
-  let chatRoleProviderId = '';
-  let chatRoleModel = '';
-  let utilityRoleProviderId = '';
-  let utilityRoleModel = '';
-  let visionRoleProviderId = '';
-  let visionRoleModel = '';
+  let chatRoleEntries: ModelRoleDraft[] = emptyRoleEntries();
+  let utilityRoleEntries: ModelRoleDraft[] = emptyRoleEntries();
+  let visionRoleEntries: ModelRoleDraft[] = emptyRoleEntries();
   let composer = '';
   let activeRunId = '';
   let activeView: string = strings.nav.chat;
@@ -127,6 +125,26 @@
   let errorMessage = '';
 
   $: selectedConversation = conversations.find((conversation) => conversation.id === selectedConversationId);
+
+  function emptyRoleEntries(): ModelRoleDraft[] {
+    return [
+      { provider_id: '', model_id: '' },
+      { provider_id: '', model_id: '' },
+      { provider_id: '', model_id: '' }
+    ];
+  }
+
+  function roleEntriesFor(role: 'chat' | 'utility' | 'vision'): ModelRoleDraft[] {
+    const bindings = modelRoles
+      .filter((binding) => binding.role === role)
+      .sort((left, right) => left.position - right.position)
+      .slice(0, 3)
+      .map((binding) => ({ provider_id: binding.provider_id, model_id: binding.model_id }));
+    while (bindings.length < 3) {
+      bindings.push({ provider_id: '', model_id: '' });
+    }
+    return bindings;
+  }
 
   let setupEmail = '';
   let setupDisplayName = '';
@@ -351,7 +369,7 @@
 
   async function refreshModels(providerId = ''): Promise<void> {
     const providerQuery = providerId ? `&provider_id=${encodeURIComponent(providerId)}` : '';
-    const response = await getJSON<ModelsResponse>(`/api/v1/models?limit=500&include_unavailable=true${providerQuery}`);
+    const response = await getJSON<ModelsResponse>(`/api/v1/models?limit=1000&include_unavailable=true${providerQuery}`);
     providerModels = response.models ?? [];
     if ((!selectedProviderId || !selectedModel) && providerModels.length > 0) {
       selectedProviderId = selectedProviderId || providerModels[0].provider_id;
@@ -362,27 +380,29 @@
   async function refreshModelRoles(): Promise<void> {
     const response = await getJSON<ModelRolesResponse>('/api/v1/model-roles');
     modelRoles = response.roles ?? [];
-    const chatRole = modelRoles.find((role) => role.role === 'chat' && role.position === 0);
-    const utilityRole = modelRoles.find((role) => role.role === 'utility' && role.position === 0);
-    const visionRole = modelRoles.find((role) => role.role === 'vision' && role.position === 0);
-    chatRoleProviderId = chatRole?.provider_id ?? chatRoleProviderId;
-    chatRoleModel = chatRole?.model_id ?? chatRoleModel;
-    utilityRoleProviderId = utilityRole?.provider_id ?? utilityRoleProviderId;
-    utilityRoleModel = utilityRole?.model_id ?? utilityRoleModel;
-    visionRoleProviderId = visionRole?.provider_id ?? visionRoleProviderId;
-    visionRoleModel = visionRole?.model_id ?? visionRoleModel;
+    chatRoleEntries = roleEntriesFor('chat');
+    utilityRoleEntries = roleEntriesFor('utility');
+    visionRoleEntries = roleEntriesFor('vision');
   }
 
-  async function saveModelRole(role: 'chat' | 'utility' | 'vision', providerId: string, modelId: string): Promise<void> {
-    if (!providerId || !modelId) {
-      errorMessage = 'Select both a provider and model before saving this role.';
+  async function saveModelRole(role: 'chat' | 'utility' | 'vision', entries: ModelRoleDraft[]): Promise<void> {
+    const hasIncompleteEntry = entries.some((entry) => {
+      const hasProvider = Boolean(entry.provider_id.trim());
+      const hasModel = Boolean(entry.model_id.trim());
+      return hasProvider !== hasModel;
+    });
+    if (hasIncompleteEntry) {
+      errorMessage = 'Each model role entry must include both a provider and a model ID.';
       return;
     }
+    const models = entries
+      .map((entry) => ({ provider_id: entry.provider_id.trim(), model_id: entry.model_id.trim() }))
+      .filter((entry) => entry.provider_id && entry.model_id);
     const response = await putJSON<ModelRolesResponse>(`/api/v1/model-roles/${role}`, {
-      models: [{ provider_id: providerId, model_id: modelId }]
+      models
     });
     modelRoles = response.roles ?? [];
-    notice = `${role} model saved.`;
+    notice = `${role} model chain saved.`;
     await refreshModelRoles();
   }
 
@@ -1334,12 +1354,9 @@
           {sessions}
           {status}
           {submitting}
-          bind:chatRoleModel
-          bind:chatRoleProviderId
-          bind:utilityRoleModel
-          bind:utilityRoleProviderId
-          bind:visionRoleModel
-          bind:visionRoleProviderId
+          bind:chatRoleEntries
+          bind:utilityRoleEntries
+          bind:visionRoleEntries
           {user}
         />
       {:else}
@@ -1405,6 +1422,7 @@
             onEdit={editAgent}
             onRefresh={refreshAgents}
             onSubmit={createAgent}
+            {providerModels}
             {providers}
           />
         {:else if activeView === strings.nav.memories}
@@ -1458,6 +1476,7 @@
             onRunTask={runTask}
             onShowEvents={showTaskRunEvents}
             onSubmit={createTask}
+            {providerModels}
             {providers}
             {submitting}
           />
@@ -1509,6 +1528,7 @@
             onRefreshModels={refreshProviderModels}
             onSubmit={createProvider}
             onTest={testProvider}
+            {providerModels}
             {providers}
             {submitting}
           />

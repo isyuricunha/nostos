@@ -2,7 +2,7 @@
   import EmptyState from '../components/common/EmptyState.svelte';
   import StatusPill from '../components/common/StatusPill.svelte';
   import ModelPicker from '../components/models/ModelPicker.svelte';
-  import type { FeedbackStats, Provider, ProviderModel, ReadyStatus, ReplyPreset, Session, User } from '../lib/types';
+  import type { FeedbackStats, ModelRoleDraft, Provider, ProviderModel, ReadyStatus, ReplyPreset, Session, User } from '../lib/types';
   import { strings } from '../strings';
 
   export let user: User;
@@ -11,12 +11,9 @@
   export let feedbackStats: FeedbackStats = { positive: 0, negative: 0 };
   export let providers: Provider[] = [];
   export let providerModels: ProviderModel[] = [];
-  export let chatRoleProviderId = '';
-  export let chatRoleModel = '';
-  export let utilityRoleProviderId = '';
-  export let utilityRoleModel = '';
-  export let visionRoleProviderId = '';
-  export let visionRoleModel = '';
+  export let chatRoleEntries: ModelRoleDraft[] = [];
+  export let utilityRoleEntries: ModelRoleDraft[] = [];
+  export let visionRoleEntries: ModelRoleDraft[] = [];
   export let replyPresets: ReplyPreset[] = [];
   export let replyPresetName = '';
   export let replyPresetDescription = '';
@@ -26,7 +23,7 @@
   export let onRevokeSession: (sessionId: string) => void | Promise<void>;
   export let onRefreshDiagnostics: () => void | Promise<void>;
   export let onRefreshFeedbackStats: () => void | Promise<void>;
-  export let onSaveModelRole: (role: 'chat' | 'utility' | 'vision', providerId: string, modelId: string) => void | Promise<void>;
+  export let onSaveModelRole: (role: 'chat' | 'utility' | 'vision', entries: ModelRoleDraft[]) => void | Promise<void>;
   export let onCreateReplyPreset: () => void | Promise<void>;
   export let onToggleReplyPreset: (preset: ReplyPreset) => void | Promise<void>;
   export let onResetReplyPresets: () => void | Promise<void>;
@@ -101,24 +98,51 @@
           <h3>Chat Model</h3>
           <p>Default for normal conversations and final user-facing answers.</p>
         </div>
-        <ModelPicker bind:selectedModelId={chatRoleModel} bind:selectedProviderId={chatRoleProviderId} label="Chat model" models={providerModels} {providers} role="chat" />
-        <button on:click={() => onSaveModelRole('chat', chatRoleProviderId, chatRoleModel)} type="button">Save Chat Model</button>
+        {#each chatRoleEntries as entry, index (index)}
+          <ModelPicker
+            bind:selectedModelId={entry.model_id}
+            bind:selectedProviderId={entry.provider_id}
+            label={index === 0 ? 'Chat primary model' : `Chat fallback ${index}`}
+            models={providerModels}
+            {providers}
+            role="chat"
+          />
+        {/each}
+        <button on:click={() => onSaveModelRole('chat', chatRoleEntries)} type="button">Save Chat Chain</button>
       </div>
       <div class="model-role-card">
         <div>
           <h3>Utility Model</h3>
           <p>Used for summaries, titles, reply drafts, and lightweight worker AI operations.</p>
         </div>
-        <ModelPicker bind:selectedModelId={utilityRoleModel} bind:selectedProviderId={utilityRoleProviderId} label="Utility model" models={providerModels} {providers} role="utility" />
-        <button on:click={() => onSaveModelRole('utility', utilityRoleProviderId, utilityRoleModel)} type="button">Save Utility Model</button>
+        {#each utilityRoleEntries as entry, index (index)}
+          <ModelPicker
+            bind:selectedModelId={entry.model_id}
+            bind:selectedProviderId={entry.provider_id}
+            label={index === 0 ? 'Utility primary model' : `Utility fallback ${index}`}
+            models={providerModels}
+            {providers}
+            role="utility"
+          />
+        {/each}
+        <button on:click={() => onSaveModelRole('utility', utilityRoleEntries)} type="button">Save Utility Chain</button>
       </div>
       <div class="model-role-card">
         <div>
           <h3>Vision Model</h3>
           <p>Configured now for future visual-understanding requests. Image generation is not implemented.</p>
         </div>
-        <ModelPicker bind:selectedModelId={visionRoleModel} bind:selectedProviderId={visionRoleProviderId} label="Vision model" models={providerModels} {providers} role="vision" />
-        <button on:click={() => onSaveModelRole('vision', visionRoleProviderId, visionRoleModel)} type="button">Save Vision Model</button>
+        {#each visionRoleEntries as entry, index (index)}
+          <ModelPicker
+            bind:selectedModelId={entry.model_id}
+            bind:selectedProviderId={entry.provider_id}
+            label={index === 0 ? 'Vision primary model' : `Vision fallback ${index}`}
+            models={providerModels}
+            {providers}
+            role="vision"
+          />
+        {/each}
+        <button on:click={() => onSaveModelRole('vision', visionRoleEntries)} type="button">Save Vision Chain</button>
       </div>
     </div>
     <div class="catalog-strip">

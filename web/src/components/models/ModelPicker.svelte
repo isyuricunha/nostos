@@ -9,6 +9,7 @@
   export let role: 'chat' | 'utility' | 'vision' | '' = '';
   export let allowManual = true;
   export let compact = false;
+  export let fixedProviderId = '';
 
   let open = false;
   let query = '';
@@ -23,7 +24,9 @@
       ? `${selectedProvider?.name ?? 'Manual'} / ${selectedModelId}`
       : 'Select model';
   $: normalizedQuery = query.trim().toLowerCase();
-  $: filteredModels = models
+  $: scopedModels = fixedProviderId ? models.filter((model) => model.provider_id === fixedProviderId) : models;
+  $: scopedProviders = fixedProviderId ? providers.filter((provider) => provider.id === fixedProviderId) : providers;
+  $: filteredModels = scopedModels
     .filter((model) => isRoleCompatible(model, role))
     .filter((model) => {
       if (!normalizedQuery) return true;
@@ -46,8 +49,8 @@
     const trimmed = manualModel.trim();
     if (!trimmed) return;
     selectedModelId = trimmed;
-    if (!selectedProviderId && providers.length > 0) {
-      selectedProviderId = providers[0].id;
+    if (!selectedProviderId) {
+      selectedProviderId = fixedProviderId || scopedProviders[0]?.id || '';
     }
     open = false;
   }
@@ -76,7 +79,13 @@
 
 <div class:compact class="model-picker">
   <span class="model-picker-label">{label}</span>
-  <button aria-expanded={open} class="model-picker-trigger" on:click={() => (open = !open)} type="button">
+  <button
+    aria-expanded={open}
+    aria-label={`${label}: ${selectedLabel}`}
+    class="model-picker-trigger"
+    on:click={() => (open = !open)}
+    type="button"
+  >
     <span>{selectedLabel}</span>
     {#if selectedProvider}
       <small>{selectedProvider.name}</small>

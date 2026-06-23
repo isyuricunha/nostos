@@ -85,6 +85,11 @@ export type ModelRoleBinding = {
   model_id: string;
 };
 
+export type ModelRoleDraft = {
+  provider_id: string;
+  model_id: string;
+};
+
 export type Conversation = {
   id: string;
   title: string;
