@@ -38,6 +38,10 @@ type ProviderResolver interface {
 	ResolveForChat(ctx context.Context, workspaceID string, providerID string) (providers.Provider, string, error)
 }
 
+type ModelRoleResolver interface {
+	ResolveModelRole(ctx context.Context, workspaceID string, role string) (providers.RoleResolution, error)
+}
+
 type AgentResolver interface {
 	GetChatAgent(ctx context.Context, workspaceID string, agentID string) (chat.AgentContext, error)
 }
@@ -583,19 +587,36 @@ func (s *Service) executeAgentTask(ctx context.Context, run Run, task Task) (str
 		return "", err
 	}
 	providerID := strings.TrimSpace(task.ProviderID)
-	if providerID == "" {
-		providerID = agent.DefaultProviderID
-	}
-	if providerID == "" {
-		return "", errors.New("agent task requires provider_id or agent default provider")
-	}
-	provider, apiKey, err := s.providers.ResolveForChat(ctx, task.WorkspaceID, providerID)
-	if err != nil {
-		return "", err
-	}
 	model := strings.TrimSpace(task.Model)
-	if model == "" {
-		model = agent.DefaultModel
+	var provider providers.Provider
+	var apiKey string
+	if providerID == "" && model == "" {
+		roleResolver, ok := s.providers.(ModelRoleResolver)
+		if !ok {
+			return "", errors.New("agent task requires provider/model or a configured utility model")
+		}
+		resolution, err := roleResolver.ResolveModelRole(ctx, task.WorkspaceID, providers.ModelRoleUtility)
+		if err != nil {
+			return "", err
+		}
+		provider = resolution.Provider
+		apiKey = resolution.APIKey
+		model = resolution.ModelID
+	} else {
+		if providerID == "" {
+			providerID = agent.DefaultProviderID
+		}
+		if model == "" {
+			model = agent.DefaultModel
+		}
+		if providerID == "" {
+			return "", errors.New("agent task requires provider_id, agent default provider, or utility model")
+		}
+		var err error
+		provider, apiKey, err = s.providers.ResolveForChat(ctx, task.WorkspaceID, providerID)
+		if err != nil {
+			return "", err
+		}
 	}
 	if model == "" {
 		model = provider.DefaultModel

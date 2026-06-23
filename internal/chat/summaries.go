@@ -181,28 +181,20 @@ func (s *Service) summarizeConversation(ctx context.Context, conversation Conver
 }
 
 func (s *Service) resolveSummaryProvider(ctx context.Context, conversation Conversation) (providers.Provider, string, string, error) {
-	if strings.TrimSpace(conversation.ProviderID) != "" {
-		provider, apiKey, err := s.providers.ResolveForChat(ctx, conversation.WorkspaceID, conversation.ProviderID)
-		if err != nil {
-			return providers.Provider{}, "", "", err
+	if roleResolver, ok := s.providers.(ModelRoleResolver); ok {
+		resolution, err := roleResolver.ResolveModelRole(ctx, conversation.WorkspaceID, providers.ModelRoleUtility)
+		if err == nil {
+			return resolution.Provider, resolution.APIKey, resolution.ModelID, nil
 		}
-		model := strings.TrimSpace(conversation.Model)
-		if model == "" {
-			model = provider.DefaultModel
-		}
-		if model == "" {
-			model = provider.FallbackModel
-		}
-		if model == "" {
-			return providers.Provider{}, "", "", fmt.Errorf("%w: summary model is not configured", ErrInvalidInput)
-		}
-		return provider, apiKey, model, nil
 	}
-	provider, apiKey, err := s.providers.ResolveDefaultForChat(ctx, conversation.WorkspaceID)
+	provider, apiKey, err := s.resolveProviderAndModel(ctx, conversation.WorkspaceID, conversation.ProviderID, &conversation.Model, providers.ModelRoleUtility)
 	if err != nil {
 		return providers.Provider{}, "", "", err
 	}
-	model := provider.DefaultModel
+	model := strings.TrimSpace(conversation.Model)
+	if model == "" {
+		model = provider.DefaultModel
+	}
 	if model == "" {
 		model = provider.FallbackModel
 	}

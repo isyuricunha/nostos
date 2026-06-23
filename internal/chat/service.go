@@ -22,6 +22,10 @@ type ProviderResolver interface {
 	ResolveDefaultForChat(ctx context.Context, workspaceID string) (providers.Provider, string, error)
 }
 
+type ModelRoleResolver interface {
+	ResolveModelRole(ctx context.Context, workspaceID string, role string) (providers.RoleResolution, error)
+}
+
 type AgentResolver interface {
 	GetChatAgent(ctx context.Context, workspaceID string, agentID string) (AgentContext, error)
 }
@@ -147,19 +151,16 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 	if providerID == "" {
 		providerID = agent.DefaultProviderID
 	}
-	if providerID == "" {
-		return fmt.Errorf("%w: provider is required", ErrInvalidInput)
-	}
-	provider, apiKey, err := s.providers.ResolveForChat(ctx, principal.WorkspaceID, providerID)
-	if err != nil {
-		return err
-	}
 	model := strings.TrimSpace(input.Model)
 	if model == "" {
 		model = conversation.Model
 	}
 	if model == "" {
 		model = agent.DefaultModel
+	}
+	provider, apiKey, err := s.resolveProviderAndModel(ctx, principal.WorkspaceID, providerID, &model, providers.ModelRoleChat)
+	if err != nil {
+		return err
 	}
 	if model == "" {
 		model = provider.DefaultModel
@@ -481,10 +482,6 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 	if providerID == "" {
 		providerID = agent.DefaultProviderID
 	}
-	provider, apiKey, err := s.providers.ResolveForChat(ctx, principal.WorkspaceID, providerID)
-	if err != nil {
-		return err
-	}
 	model := input.Model
 	if model == "" {
 		model = conversation.Model
@@ -492,8 +489,15 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 	if model == "" {
 		model = agent.DefaultModel
 	}
+	provider, apiKey, err := s.resolveProviderAndModel(ctx, principal.WorkspaceID, providerID, &model, providers.ModelRoleChat)
+	if err != nil {
+		return err
+	}
 	if model == "" {
 		model = provider.DefaultModel
+	}
+	if model == "" {
+		return fmt.Errorf("%w: model is required", ErrInvalidInput)
 	}
 	userMessage, err := s.repo.CreateMessage(ctx, Message{
 		ConversationID:  conversationID,
@@ -928,6 +932,28 @@ func (s *Service) resolveAgent(ctx context.Context, conversation Conversation) (
 		agent.Temperature = 0.7
 	}
 	return agent, nil
+}
+
+func (s *Service) resolveProviderAndModel(ctx context.Context, workspaceID string, providerID string, model *string, role string) (providers.Provider, string, error) {
+	if strings.TrimSpace(providerID) != "" {
+		if s.providers == nil {
+			return providers.Provider{}, "", errors.New("provider resolver is unavailable")
+		}
+		return s.providers.ResolveForChat(ctx, workspaceID, providerID)
+	}
+	if roleResolver, ok := s.providers.(ModelRoleResolver); ok {
+		resolution, err := roleResolver.ResolveModelRole(ctx, workspaceID, role)
+		if err == nil {
+			if model != nil && strings.TrimSpace(*model) == "" {
+				*model = resolution.ModelID
+			}
+			return resolution.Provider, resolution.APIKey, nil
+		}
+	}
+	if s.providers == nil {
+		return providers.Provider{}, "", errors.New("provider resolver is unavailable")
+	}
+	return s.providers.ResolveDefaultForChat(ctx, workspaceID)
 }
 
 func (s *Service) selectMemories(ctx context.Context, principal PrincipalContext, conversation Conversation, agent AgentContext, query string) ([]MemorySnippet, error) {

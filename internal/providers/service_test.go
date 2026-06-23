@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -65,6 +66,143 @@ func TestProviderCreateEncryptsSecretAndRefreshesModels(t *testing.T) {
 	}
 	if len(models) != 1 || models[0].ModelID != "mock-model" {
 		t.Fatalf("unexpected models: %#v", models)
+	}
+}
+
+func TestModelCatalogRefreshPreservesFullIDsAndUnavailableModels(t *testing.T) {
+	ctx := context.Background()
+	modelIDs := make([]string, 0, 800)
+	modelIDs = append(modelIDs,
+		"NVIDIA NIM/openai/gpt-oss-120b",
+		"NVIDIA NIM/moonshotai/kimi-k2.6",
+		"Bifrost/opencode-proxy/deepseek-v4-flash-free",
+	)
+	for index := 3; index < 800; index++ {
+		modelIDs = append(modelIDs, "Bifrost/catalog/model-"+time.Now().UTC().Format("20060102")+"-"+string(rune('a'+index%26))+json.Number(fmt.Sprintf("%03d", index)).String())
+	}
+	activeIDs := modelIDs
+	failModels := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if failModels {
+			http.Error(w, "catalog unavailable", http.StatusBadGateway)
+			return
+		}
+		data := make([]map[string]string, 0, len(activeIDs))
+		for _, modelID := range activeIDs {
+			data = append(data, map[string]string{"id": modelID})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newProviderTestContext(t)
+	defer cleanup()
+	service := NewService(cfg, NewSQLRepository(store), auth.NewSQLRepository(store), NewOpenAIClient())
+	apiKey := "test-api-key"
+	provider, err := service.Create(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, ProviderInput{
+		Name:             "Large Bifrost",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "NVIDIA NIM/openai/gpt-oss-120b",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	models, err := service.RefreshModels(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, provider.ID)
+	if err != nil {
+		t.Fatalf("refresh large catalog: %v", err)
+	}
+	if len(models) != 800 {
+		t.Fatalf("expected 800 cached models, got %d", len(models))
+	}
+	foundFullID := false
+	for _, model := range models {
+		if model.ModelID == "NVIDIA NIM/moonshotai/kimi-k2.6" && model.Available && model.ProviderID == provider.ID {
+			foundFullID = true
+		}
+	}
+	if !foundFullID {
+		t.Fatal("full provider model ID was not preserved")
+	}
+
+	activeIDs = modelIDs[:10]
+	if _, err := service.RefreshModels(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, provider.ID); err != nil {
+		t.Fatalf("refresh reduced catalog: %v", err)
+	}
+	allModels, err := service.ListCatalogModels(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, ModelQuery{Limit: 1000, IncludeUnavailable: true})
+	if err != nil {
+		t.Fatalf("list catalog: %v", err)
+	}
+	missingMarkedUnavailable := false
+	for _, model := range allModels {
+		if model.ModelID == modelIDs[50] && !model.Available {
+			missingMarkedUnavailable = true
+		}
+	}
+	if !missingMarkedUnavailable {
+		t.Fatal("missing API model was not marked unavailable")
+	}
+
+	failModels = true
+	if _, err := service.RefreshModels(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, provider.ID); err == nil {
+		t.Fatal("expected refresh failure")
+	}
+	afterFailure, err := service.ListCatalogModels(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, ModelQuery{Limit: 1000, IncludeUnavailable: true})
+	if err != nil {
+		t.Fatalf("list after failure: %v", err)
+	}
+	if len(afterFailure) != len(allModels) {
+		t.Fatalf("failed refresh should preserve cache; before=%d after=%d", len(allModels), len(afterFailure))
+	}
+}
+
+func TestModelRolesResolveProviderScopedFallbacks(t *testing.T) {
+	ctx := context.Background()
+	cfg, store, user, cleanup := newProviderTestContext(t)
+	defer cleanup()
+	service := NewService(cfg, NewSQLRepository(store), auth.NewSQLRepository(store), NewOpenAIClient())
+	apiKey := "test-api-key"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "Bifrost/opencode-proxy/deepseek-v4-flash-free"}}})
+	}))
+	defer server.Close()
+	provider, err := service.Create(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, ProviderInput{
+		Name:             "Bifrost",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "legacy-default",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	if _, err := service.CreateManualModel(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, ModelInput{
+		ProviderID:       provider.ID,
+		ModelID:          "Bifrost/opencode-proxy/deepseek-v4-flash-free",
+		Enabled:          true,
+		Available:        true,
+		Capabilities:     []string{"chat"},
+		CapabilitySource: "manual",
+	}); err != nil {
+		t.Fatalf("create manual model: %v", err)
+	}
+	if _, err := service.SetModelRole(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, ModelRoleUtility, ModelRoleInput{
+		Models: []ModelRoleReference{{ProviderID: provider.ID, ModelID: "Bifrost/opencode-proxy/deepseek-v4-flash-free"}},
+	}); err != nil {
+		t.Fatalf("set utility role: %v", err)
+	}
+	resolution, err := service.ResolveModelRole(ctx, user.WorkspaceID, ModelRoleUtility)
+	if err != nil {
+		t.Fatalf("resolve utility role: %v", err)
+	}
+	if resolution.Provider.ID != provider.ID || resolution.ModelID != "Bifrost/opencode-proxy/deepseek-v4-flash-free" {
+		t.Fatalf("unexpected resolution: %#v", resolution)
 	}
 }
 

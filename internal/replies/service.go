@@ -17,6 +17,10 @@ type ProviderResolver interface {
 	ResolveForChat(ctx context.Context, workspaceID string, providerID string) (providers.Provider, string, error)
 }
 
+type ModelRoleResolver interface {
+	ResolveModelRole(ctx context.Context, workspaceID string, role string) (providers.RoleResolution, error)
+}
+
 type Service struct {
 	cfg       config.Config
 	repo      Repository
@@ -118,15 +122,32 @@ func (s *Service) GenerateDraft(ctx context.Context, principal PrincipalContext,
 	if model == "" {
 		model = source.Model
 	}
-	if providerID == "" || model == "" {
-		return Draft{}, fmt.Errorf("%w: provider_id and model are required", ErrInvalidInput)
-	}
 	if s.providers == nil || s.client == nil {
 		return Draft{}, errors.New("provider execution is not configured")
 	}
-	provider, apiKey, err := s.providers.ResolveForChat(ctx, principal.WorkspaceID, providerID)
-	if err != nil {
-		return Draft{}, err
+	var provider providers.Provider
+	var apiKey string
+	if providerID == "" && model == "" {
+		roleResolver, ok := s.providers.(ModelRoleResolver)
+		if !ok {
+			return Draft{}, fmt.Errorf("%w: provider_id and model are required", ErrInvalidInput)
+		}
+		resolution, err := roleResolver.ResolveModelRole(ctx, principal.WorkspaceID, providers.ModelRoleUtility)
+		if err != nil {
+			return Draft{}, err
+		}
+		provider = resolution.Provider
+		apiKey = resolution.APIKey
+		model = resolution.ModelID
+	} else {
+		if providerID == "" || model == "" {
+			return Draft{}, fmt.Errorf("%w: provider_id and model are required", ErrInvalidInput)
+		}
+		var err error
+		provider, apiKey, err = s.providers.ResolveForChat(ctx, principal.WorkspaceID, providerID)
+		if err != nil {
+			return Draft{}, err
+		}
 	}
 	timeout := time.Duration(provider.RequestTimeoutMS) * time.Millisecond
 	if timeout <= 0 {

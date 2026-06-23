@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	ErrInvalidInput  = errors.New("invalid provider input")
-	ErrSecretMissing = errors.New("provider secret is missing")
+	ErrInvalidInput      = errors.New("invalid provider input")
+	ErrSecretMissing     = errors.New("provider secret is missing")
+	ErrRefreshInProgress = errors.New("model refresh is already running")
 )
 
 type Service struct {
@@ -107,7 +108,7 @@ func (s *Service) RefreshModels(ctx context.Context, principal PrincipalContext,
 	if err != nil {
 		return nil, err
 	}
-	modelIDs, err := s.client.ListModels(ctx, provider, apiKey)
+	modelIDs, err := s.client.ListModels(ctx, s.providerForModelRefresh(provider), apiKey)
 	status := "healthy"
 	lastError := ""
 	if err != nil {
@@ -117,15 +118,125 @@ func (s *Service) RefreshModels(ctx context.Context, principal PrincipalContext,
 		return nil, err
 	}
 	_ = s.repo.UpdateHealth(ctx, principal.WorkspaceID, providerID, status, lastError, time.Now().UTC())
-	return s.repo.ReplaceModels(ctx, providerID, modelIDs, "api")
+	return s.repo.UpsertRefreshedModels(ctx, principal.WorkspaceID, providerID, modelIDs)
 }
 
 func (s *Service) ListModels(ctx context.Context, principal PrincipalContext, providerID string) ([]Model, error) {
-	provider, _, err := s.repo.Get(ctx, principal.WorkspaceID, providerID)
-	if err != nil {
-		return nil, err
+	if strings.TrimSpace(providerID) != "" {
+		provider, _, err := s.repo.Get(ctx, principal.WorkspaceID, providerID)
+		if err != nil {
+			return nil, err
+		}
+		providerID = provider.ID
 	}
-	return s.repo.ListModels(ctx, provider.ID)
+	return s.repo.ListModels(ctx, ModelQuery{WorkspaceID: principal.WorkspaceID, ProviderID: providerID, IncludeUnavailable: true})
+}
+
+func (s *Service) ListCatalogModels(ctx context.Context, principal PrincipalContext, query ModelQuery) ([]Model, error) {
+	query.WorkspaceID = principal.WorkspaceID
+	return s.repo.ListModels(ctx, query)
+}
+
+func (s *Service) CreateManualModel(ctx context.Context, principal PrincipalContext, input ModelInput) (Model, error) {
+	input.ProviderID = strings.TrimSpace(input.ProviderID)
+	input.ModelID = strings.TrimSpace(input.ModelID)
+	if input.ProviderID == "" || input.ModelID == "" {
+		return Model{}, fmt.Errorf("%w: provider_id and model_id are required", ErrInvalidInput)
+	}
+	return s.repo.CreateManualModel(ctx, principal.WorkspaceID, input)
+}
+
+func (s *Service) UpdateModel(ctx context.Context, principal PrincipalContext, modelID string, patch ModelPatch) (Model, error) {
+	return s.repo.UpdateModel(ctx, principal.WorkspaceID, modelID, patch)
+}
+
+func (s *Service) CleanupUnavailableModels(ctx context.Context, principal PrincipalContext, providerID string) (int, error) {
+	if _, _, err := s.repo.Get(ctx, principal.WorkspaceID, providerID); err != nil {
+		return 0, err
+	}
+	return s.repo.CleanupUnavailableModels(ctx, principal.WorkspaceID, providerID)
+}
+
+func (s *Service) StartModelRefresh(ctx context.Context, principal PrincipalContext, providerID string) (ModelRefreshStatus, error) {
+	startedAt := time.Now().UTC()
+	started, err := s.repo.TryStartModelRefresh(ctx, principal.WorkspaceID, providerID, startedAt)
+	if err != nil {
+		return ModelRefreshStatus{}, err
+	}
+	status, err := s.repo.ModelRefreshStatus(ctx, principal.WorkspaceID, providerID)
+	if err != nil {
+		return ModelRefreshStatus{}, err
+	}
+	if !started {
+		return status, ErrRefreshInProgress
+	}
+	go s.runModelRefresh(principal.WorkspaceID, providerID, startedAt)
+	return status, nil
+}
+
+func (s *Service) ModelRefreshStatus(ctx context.Context, principal PrincipalContext, providerID string) (ModelRefreshStatus, error) {
+	return s.repo.ModelRefreshStatus(ctx, principal.WorkspaceID, providerID)
+}
+
+func (s *Service) ListModelRoles(ctx context.Context, principal PrincipalContext) ([]ModelRoleBinding, error) {
+	return s.repo.ListModelRoles(ctx, principal.WorkspaceID)
+}
+
+func (s *Service) SetModelRole(ctx context.Context, principal PrincipalContext, role string, input ModelRoleInput) ([]ModelRoleBinding, error) {
+	role = strings.ToLower(strings.TrimSpace(role))
+	if !validModelRole(role) {
+		return nil, fmt.Errorf("%w: model role is invalid", ErrInvalidInput)
+	}
+	refs := make([]ModelRoleReference, 0, len(input.Models))
+	for _, ref := range input.Models {
+		ref.ProviderID = strings.TrimSpace(ref.ProviderID)
+		ref.ModelID = strings.TrimSpace(ref.ModelID)
+		if ref.ProviderID == "" || ref.ModelID == "" {
+			continue
+		}
+		if _, _, err := s.repo.Get(ctx, principal.WorkspaceID, ref.ProviderID); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return s.repo.ReplaceModelRoleBindings(ctx, principal.WorkspaceID, role, refs)
+}
+
+func (s *Service) ResolveModelRole(ctx context.Context, workspaceID string, role string) (RoleResolution, error) {
+	role = strings.ToLower(strings.TrimSpace(role))
+	if !validModelRole(role) {
+		return RoleResolution{}, fmt.Errorf("%w: model role is invalid", ErrInvalidInput)
+	}
+	bindings, err := s.repo.ListModelRoles(ctx, workspaceID)
+	if err != nil {
+		return RoleResolution{}, err
+	}
+	for _, binding := range bindings {
+		if binding.Role != role {
+			continue
+		}
+		provider, secret, err := s.repo.Get(ctx, workspaceID, binding.ProviderID)
+		if err != nil || !provider.Enabled || strings.TrimSpace(binding.ModelID) == "" {
+			continue
+		}
+		apiKey, err := s.resolveAPIKey(secret)
+		if err != nil {
+			continue
+		}
+		return RoleResolution{Provider: provider, APIKey: apiKey, ModelID: binding.ModelID, Role: role, Reason: "model_role"}, nil
+	}
+	provider, apiKey, err := s.ResolveDefaultForChat(ctx, workspaceID)
+	if err != nil {
+		return RoleResolution{}, err
+	}
+	model := provider.DefaultModel
+	if model == "" {
+		model = provider.FallbackModel
+	}
+	if model == "" {
+		return RoleResolution{}, fmt.Errorf("%w: %s model is not configured", ErrInvalidInput, role)
+	}
+	return RoleResolution{Provider: provider, APIKey: apiKey, ModelID: model, Role: role, Reason: "legacy_provider_default"}, nil
 }
 
 func (s *Service) ResolveForChat(ctx context.Context, workspaceID string, providerID string) (Provider, string, error) {
@@ -196,6 +307,40 @@ func (s *Service) CheckProviderHealth(ctx context.Context, limit int) (string, e
 		}
 	}
 	return fmt.Sprintf("provider health checked=%d healthy=%d unhealthy=%d", len(items), healthy, unhealthy), nil
+}
+
+func (s *Service) runModelRefresh(workspaceID string, providerID string, startedAt time.Time) {
+	timeout := s.cfg.Models.RefreshTimeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	principal := PrincipalContext{WorkspaceID: workspaceID}
+	models, err := s.RefreshModels(ctx, principal, providerID)
+	completedAt := time.Now().UTC()
+	status := ModelRefreshStatus{
+		ProviderID:  providerID,
+		State:       "succeeded",
+		CompletedAt: &completedAt,
+		DurationMS:  int(completedAt.Sub(startedAt).Milliseconds()),
+	}
+	if err != nil {
+		status.State = "failed"
+		status.ErrorCategory = "model_refresh_failed"
+		status.ErrorMessage = sanitizeProviderError(err)
+	} else {
+		status.CachedModelCount = len(models)
+	}
+	_ = s.repo.FinishModelRefresh(context.Background(), workspaceID, providerID, status)
+}
+
+func (s *Service) providerForModelRefresh(provider Provider) Provider {
+	timeoutMS := int(s.cfg.Models.RefreshTimeout / time.Millisecond)
+	if timeoutMS > provider.RequestTimeoutMS {
+		provider.RequestTimeoutMS = timeoutMS
+	}
+	return provider
 }
 
 func (s *Service) normalizeInput(workspaceID string, input ProviderInput, requireSecret bool) (Provider, ProviderSecret, error) {

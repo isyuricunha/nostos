@@ -27,6 +27,7 @@ type Config struct {
 	Worker   WorkerConfig
 	Tasks    TaskConfig
 	Chat     ChatConfig
+	Models   ModelConfig
 	Runtime  RuntimeConfig
 }
 
@@ -63,6 +64,10 @@ type ChatConfig struct {
 	MaxToolIterations  int
 	ContextThreshold   int
 	RecentMessageLimit int
+}
+
+type ModelConfig struct {
+	RefreshTimeout time.Duration
 }
 
 type RuntimeConfig struct {
@@ -106,6 +111,9 @@ func Load() (Config, error) {
 			MaxToolIterations:  envInt("CHAT_MAX_TOOL_ITERATIONS", 8),
 			ContextThreshold:   envInt("CHAT_CONTEXT_THRESHOLD", 60000),
 			RecentMessageLimit: envInt("CHAT_RECENT_MESSAGE_LIMIT", 30),
+		},
+		Models: ModelConfig{
+			RefreshTimeout: envDuration("MODEL_REFRESH_TIMEOUT", 60*time.Second),
 		},
 	}
 
@@ -184,6 +192,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Chat.RecentMessageLimit < 1 {
 		return errors.New("CHAT_RECENT_MESSAGE_LIMIT must be at least 1")
+	}
+	if c.Models.RefreshTimeout == 0 {
+		c.Models.RefreshTimeout = 60 * time.Second
+	}
+	if c.Models.RefreshTimeout < time.Second || c.Models.RefreshTimeout > 5*time.Minute {
+		return errors.New("MODEL_REFRESH_TIMEOUT must be between 1s and 300s")
 	}
 	return nil
 }
