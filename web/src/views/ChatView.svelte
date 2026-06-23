@@ -138,7 +138,7 @@
       </label>
       <label>
         Model ID
-        <input bind:value={selectedModel} aria-label="Model" placeholder="Model ID" />
+        <input bind:value={selectedModel} aria-label="Model ID" placeholder="Model ID" />
       </label>
     </div>
 

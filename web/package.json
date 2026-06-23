@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
+    "test:e2e": "pnpm build && playwright test",
     "lint": "eslint .",
     "format": "prettier --write ."
   },
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@playwright/test": "^1.61.0",
     "@sveltejs/vite-plugin-svelte": "^6.2.2",
     "@testing-library/svelte": "^5.2.9",
     "@tsconfig/svelte": "^5.0.7",
