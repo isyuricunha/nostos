@@ -26,9 +26,7 @@ Create `.env` from `.env.example`, set strong secrets, and provide a PostgreSQL 
 
 ```sh
 cp .env.example .env
-docker build -t nostos:latest .
-docker compose -f compose.yaml up -d
-docker compose -f compose.yaml exec app /nostos migrate
+docker compose up -d --build
 ```
 
 Required production values:
@@ -48,7 +46,6 @@ SQLite is supported for simple single-instance deployments:
 
 ```sh
 cp .env.example .env
-docker build -t nostos:latest .
 docker compose -f compose.yaml -f compose.sqlite.yaml up -d
 ```
 
@@ -67,6 +64,8 @@ For local evaluation with bundled PostgreSQL:
 ```sh
 POSTGRES_PASSWORD=change-me docker compose -f compose.yaml -f compose.local-db.yaml up -d
 ```
+
+The app container applies migrations during startup. The worker starts after the app health check and verifies that the schema is current before processing jobs.
 
 ## Bifrost Configuration
 
@@ -118,8 +117,8 @@ APP_ENV=development DATABASE_DRIVER=sqlite DATABASE_URL=data/dev.db make dev
 
 1. Back up PostgreSQL or `/data/nostos.db`.
 2. Pull/build the new image.
-3. Run `nostos migrate`.
-4. Restart `app` and `worker`.
+3. Preserve `APP_ENCRYPTION_KEY`.
+4. Run `docker compose up -d --build`.
 5. Check `/health/ready` and `/api/v1/diagnostics`.
 
 ## Backup Recommendations

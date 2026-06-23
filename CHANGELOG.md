@@ -14,14 +14,22 @@
 - Real worker concurrency with lease renewal and atomic scheduled-occurrence claiming.
 - Frontend controls for conversation summaries, tool approvals, provider editing, agent editing, task editing, MCP server editing, and memory editing.
 - Docker and Compose smoke validation for SQLite and bundled PostgreSQL.
+- Database-backed worker and scheduler heartbeats in diagnostics.
+- Structured task-run MCP tool-call persistence and task-run detail exposure.
+- Permanent Playwright browser E2E coverage with mock provider and mock MCP server.
 
 ### Fixed
 
 - PostgreSQL migration checks no longer issue SQLite-style placeholder queries before retrying.
 - `doctor` reports actual migration status instead of a hardcoded value.
 - README worker documentation no longer describes maintenance tasks as placeholders.
+- Empty API collection responses now serialize as `[]` instead of `null`.
+- Regeneration instructions are kept out of visible user messages.
+- Manual summary regeneration reports too-short conversations clearly.
+- Compose deployments now pass documented shell and `.env` configuration into app and worker containers.
+- Production builds now report version, commit, and build timestamp when metadata is provided.
 
 ### Not Yet Released
 
-- GitHub Actions passed for the pushed remediation commits.
+- Final GitHub Actions proof for these commits is pending.
 - The release tag has not been created.
