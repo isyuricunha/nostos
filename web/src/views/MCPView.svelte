@@ -1,10 +1,13 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from '../components/common/Icon.svelte';
-  import type { MCPServer, MCPTool } from '../lib/types';
+  import type { MCPServer, MCPTool, ToolCall } from '../lib/types';
   import { strings } from '../strings';
 
   export let mcpServers: MCPServer[] = [];
   export let mcpTools: MCPTool[] = [];
+  export let pendingToolApprovals: ToolCall[] = [];
+  export let actionStates: Record<string, string> = {};
   export let editingMCPServerId = '';
   export let mcpName = '';
   export let mcpDescription = '';
@@ -28,7 +31,7 @@
   export let onTest: (serverId: string) => void | Promise<void>;
   export let onUpdateToolPermission: (toolId: string, permissionMode: string) => void | Promise<void>;
 
-  type Tab = 'servers' | 'tools' | 'permissions';
+  type Tab = 'servers' | 'tools' | 'permissions' | 'approvals';
 
   let activeTab: Tab = 'servers';
   let query = '';
@@ -65,7 +68,10 @@
 
   async function submitForm(): Promise<void> {
     await onSubmit();
-    formOpen = false;
+    await tick();
+    if (stateFor('mcp-form') !== 'failed') {
+      formOpen = false;
+    }
   }
 
   function serverName(serverId: string): string {
@@ -82,6 +88,14 @@
   function transportDetail(server: MCPServer): string {
     if (server.transport_type === 'http') return server.http_url ?? 'HTTP URL not set';
     return server.command ? `${server.command} ${server.arguments.join(' ')}`.trim() : 'stdio command not set';
+  }
+
+  function stateFor(key: string): string {
+    return actionStates[key] ?? '';
+  }
+
+  function serverActionState(serverId: string): string {
+    return stateFor(`mcp:${serverId}:test`) || stateFor(`mcp:${serverId}:discover`) || stateFor(`mcp:${serverId}:delete`);
   }
 </script>
 
@@ -102,6 +116,7 @@
       <button class:active={activeTab === 'servers'} on:click={() => (activeTab = 'servers')} type="button">MCP Servers</button>
       <button class:active={activeTab === 'tools'} on:click={() => (activeTab = 'tools')} type="button">Discovered Tools</button>
       <button class:active={activeTab === 'permissions'} on:click={() => (activeTab = 'permissions')} type="button">Permissions</button>
+      <button class:active={activeTab === 'approvals'} on:click={() => (activeTab = 'approvals')} type="button">Approvals</button>
     </nav>
 
     <div class="window-filter-row">
@@ -127,6 +142,9 @@
                   {server.transport_type} · timeout {server.request_timeout_ms} ms
                   {server.last_connected_at ? ` · connected ${new Date(server.last_connected_at).toLocaleString()}` : ''}
                 </small>
+                {#if serverActionState(server.id)}
+                  <small class={`row-state state-${serverActionState(server.id)}`}>{serverActionState(server.id)}</small>
+                {/if}
                 {#if server.last_error}
                   <small class="danger-text">{server.last_error}</small>
                 {/if}
@@ -138,9 +156,11 @@
                 {#if openMenuId === server.id}
                   <div class="row-menu row-menu-right" role="menu">
                     <button on:click={() => startEdit(server)} type="button"><Icon name="edit" size={13} /> Edit</button>
-                    <button on:click={() => { openMenuId = ''; onTest(server.id); }} type="button"><Icon name="check" size={13} /> Test</button>
-                    <button on:click={() => { openMenuId = ''; onDiscoverTools(server.id); }} type="button">
-                      <Icon name="search" size={13} /> {strings.mcp.discover}
+                    <button disabled={stateFor(`mcp:${server.id}:test`) === 'testing'} on:click={() => { openMenuId = ''; onTest(server.id); }} type="button">
+                      <Icon name="check" size={13} /> {stateFor(`mcp:${server.id}:test`) === 'testing' ? 'Testing...' : 'Test'}
+                    </button>
+                    <button disabled={stateFor(`mcp:${server.id}:discover`) === 'discovering'} on:click={() => { openMenuId = ''; onDiscoverTools(server.id); }} type="button">
+                      <Icon name="search" size={13} /> {stateFor(`mcp:${server.id}:discover`) === 'discovering' ? 'Discovering...' : strings.mcp.discover}
                     </button>
                     <button class="danger" on:click={() => { openMenuId = ''; onDelete(server.id); }} type="button">
                       <Icon name="trash" size={13} /> Delete
@@ -170,7 +190,7 @@
           {/each}
         </div>
       {/if}
-    {:else}
+    {:else if activeTab === 'permissions'}
       {#if filteredTools.length === 0}
         <p class="window-empty">No tools available for permissions.</p>
       {:else}
@@ -192,6 +212,24 @@
                   <option value="ask">ask</option>
                   <option value="allow">allow</option>
                 </select>
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/if}
+    {:else}
+      {#if pendingToolApprovals.length === 0}
+        <p class="window-empty">No pending tool approvals.</p>
+      {:else}
+        <div class="dense-row-list">
+          {#each pendingToolApprovals as approval (approval.id)}
+            <article class="tool-row">
+              <span class="row-icon"><Icon name="tools" size={15} /></span>
+              <span class="status-dot unknown"></span>
+              <div>
+                <strong>{approval.name}</strong>
+                <span>{approval.provider_name || 'Pending approval'}</span>
+                <small>{approval.state} · {approval.approval_state} · {new Date(approval.created_at).toLocaleString()}</small>
               </div>
             </article>
           {/each}
@@ -273,6 +311,9 @@
         </div>
         <div class="editor-actions">
           <button type="submit">{editingMCPServerId ? 'Save MCP server' : strings.mcp.add}</button>
+          {#if stateFor('mcp-form')}
+            <span class={`editor-state state-${stateFor('mcp-form')}`}>{stateFor('mcp-form')}</span>
+          {/if}
           <button on:click={closeForm} type="button">Cancel</button>
         </div>
       </form>

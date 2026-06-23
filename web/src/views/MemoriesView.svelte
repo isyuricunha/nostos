@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from '../components/common/Icon.svelte';
   import type { Memory } from '../lib/types';
   import { strings } from '../strings';
 
   export let memories: Memory[] = [];
+  export let actionStates: Record<string, string> = {};
   export let editingMemoryId = '';
   export let memoryTitle = '';
   export let memoryContent = '';
@@ -64,7 +66,14 @@
 
   async function submitForm(): Promise<void> {
     await onSubmit();
-    activeTab = 'browse';
+    await tick();
+    if (stateFor('memory-form') !== 'failed') {
+      activeTab = 'browse';
+    }
+  }
+
+  function stateFor(key: string): string {
+    return actionStates[key] ?? '';
   }
 
   function cancelForm(): void {
@@ -130,6 +139,9 @@
               <div>
                 <strong>{memory.title}</strong>
                 <small>{memory.source} · used {memory.use_count} · last {formatDate(memory.last_used_at)}</small>
+                {#if stateFor(`memory:${memory.id}:delete`) || stateFor(`memory:${memory.id}:active`) || stateFor(`memory:${memory.id}:pinned`)}
+                  <small class="row-state">{stateFor(`memory:${memory.id}:delete`) || stateFor(`memory:${memory.id}:active`) || stateFor(`memory:${memory.id}:pinned`)}</small>
+                {/if}
               </div>
               <button aria-label={`Memory menu for ${memory.title}`} on:click={() => (openMenuId = openMenuId === memory.id ? '' : memory.id)} type="button">
                 <Icon name="kebab" size={14} />
@@ -213,6 +225,9 @@
         </div>
         <div class="editor-actions">
           <button type="submit">{editingMemoryId ? 'Save memory' : strings.memories.add}</button>
+          {#if stateFor('memory-form')}
+            <span class={`editor-state state-${stateFor('memory-form')}`}>{stateFor('memory-form')}</span>
+          {/if}
           <button on:click={cancelForm} type="button">Cancel</button>
         </div>
       </form>

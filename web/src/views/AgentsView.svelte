@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from '../components/common/Icon.svelte';
   import ModelPicker from '../components/models/ModelPicker.svelte';
   import type { Agent, Provider, ProviderModel } from '../lib/types';
@@ -7,6 +8,7 @@
   export let agents: Agent[] = [];
   export let providers: Provider[] = [];
   export let providerModels: ProviderModel[] = [];
+  export let actionStates: Record<string, string> = {};
   export let editingAgentId = '';
   export let agentName = '';
   export let agentDescription = '';
@@ -64,7 +66,14 @@
 
   async function submitForm(): Promise<void> {
     await onSubmit();
-    formOpen = false;
+    await tick();
+    if (stateFor('agent-form') !== 'failed') {
+      formOpen = false;
+    }
+  }
+
+  function stateFor(key: string): string {
+    return actionStates[key] ?? '';
   }
 </script>
 
@@ -111,6 +120,9 @@
               <small>
                 {agent.default_model || 'workspace default'} · memory {agent.memory_access_mode} · tools {agent.tool_permission_default}
               </small>
+              {#if stateFor(`agent:${agent.id}:duplicate`) || stateFor(`agent:${agent.id}:delete`) || stateFor(`agent:${agent.id}:toggle`)}
+                <small class="row-state">{stateFor(`agent:${agent.id}:duplicate`) || stateFor(`agent:${agent.id}:delete`) || stateFor(`agent:${agent.id}:toggle`)}</small>
+              {/if}
             </div>
             <div class="row-actions compact">
               <button aria-label={`Agent menu for ${agent.name}`} on:click={() => (openMenuId = openMenuId === agent.id ? '' : agent.id)} type="button">
@@ -215,6 +227,9 @@
         </div>
         <div class="editor-actions">
           <button type="submit">{editingAgentId ? 'Save agent' : strings.agents.add}</button>
+          {#if stateFor('agent-form')}
+            <span class={`editor-state state-${stateFor('agent-form')}`}>{stateFor('agent-form')}</span>
+          {/if}
           <button on:click={closeForm} type="button">Cancel</button>
         </div>
       </form>

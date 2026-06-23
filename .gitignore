@@ -8,6 +8,7 @@ data/
 web/dist/
 web/node_modules/
 web/coverage/
+web/test-results/
 
 *.db
 *.db-shm

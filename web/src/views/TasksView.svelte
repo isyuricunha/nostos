@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from '../components/common/Icon.svelte';
   import ModelPicker from '../components/models/ModelPicker.svelte';
   import type { Agent, Provider, ProviderModel, TaskRecord, TaskRun, TaskRunEvent, TaskToolCall } from '../lib/types';
@@ -8,6 +9,7 @@
   export let taskRuns: TaskRun[] = [];
   export let taskRunEvents: TaskRunEvent[] = [];
   export let taskRunToolCalls: TaskToolCall[] = [];
+  export let actionStates: Record<string, string> = {};
   export let agents: Agent[] = [];
   export let providers: Provider[] = [];
   export let providerModels: ProviderModel[] = [];
@@ -82,7 +84,10 @@
 
   async function submitForm(): Promise<void> {
     await onSubmit();
-    formOpen = false;
+    await tick();
+    if (stateFor('task-form') !== 'failed') {
+      formOpen = false;
+    }
   }
 
   async function showRunDetails(runId: string): Promise<void> {
@@ -99,6 +104,14 @@
 
   function formatDate(value = ''): string {
     return value ? new Date(value).toLocaleString() : 'Not scheduled';
+  }
+
+  function stateFor(key: string): string {
+    return actionStates[key] ?? '';
+  }
+
+  function taskActionState(taskId: string): string {
+    return stateFor(`task:${taskId}:run`) || stateFor(`task:${taskId}:delete`) || stateFor(`task:${taskId}:toggle`);
   }
 </script>
 
@@ -154,6 +167,9 @@
                 <small>
                   {record.task.system_managed ? 'system' : 'user'} · {record.schedule.mode} · next {formatDate(record.schedule.next_run_at)}
                 </small>
+                {#if taskActionState(record.task.id)}
+                  <small class={`row-state state-${taskActionState(record.task.id)}`}>{taskActionState(record.task.id)}</small>
+                {/if}
               </div>
               <div class="row-actions compact">
                 <button aria-label={`Task menu for ${record.task.name}`} on:click={() => (openMenuId = openMenuId === record.task.id ? '' : record.task.id)} type="button">
@@ -162,8 +178,8 @@
                 {#if openMenuId === record.task.id}
                   <div class="row-menu row-menu-right" role="menu">
                     <button on:click={() => startEdit(record)} type="button"><Icon name="edit" size={13} /> Edit</button>
-                    <button on:click={() => { openMenuId = ''; onRunTask(record.task.id); }} type="button">
-                      <Icon name="send" size={13} /> {strings.tasks.runNow}
+                    <button disabled={['queued', 'claimed', 'running', 'waiting'].includes(taskActionState(record.task.id))} on:click={() => { openMenuId = ''; onRunTask(record.task.id); }} type="button">
+                      <Icon name="send" size={13} /> {taskActionState(record.task.id) || strings.tasks.runNow}
                     </button>
                     <button on:click={() => { openMenuId = ''; onToggleState(record); }} type="button">
                       <Icon name={record.task.state === 'enabled' ? 'minus' : 'check'} size={13} />
@@ -339,6 +355,9 @@
         </label>
         <div class="editor-actions">
           <button disabled={submitting} type="submit">{editingTaskId ? 'Save task' : strings.tasks.add}</button>
+          {#if stateFor('task-form')}
+            <span class={`editor-state state-${stateFor('task-form')}`}>{stateFor('task-form')}</span>
+          {/if}
           <button on:click={closeForm} type="button">Cancel</button>
         </div>
       </form>

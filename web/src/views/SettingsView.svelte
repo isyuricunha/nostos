@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Icon from '../components/common/Icon.svelte';
   import ModelPicker from '../components/models/ModelPicker.svelte';
   import type { FeedbackStats, ModelRoleDraft, Provider, ProviderModel, ReadyStatus, ReplyPreset, Session, User } from '../lib/types';
@@ -11,6 +11,7 @@
   export let feedbackStats: FeedbackStats = { positive: 0, negative: 0 };
   export let providers: Provider[] = [];
   export let providerModels: ProviderModel[] = [];
+  export let actionStates: Record<string, string> = {};
   export let chatRoleEntries: ModelRoleDraft[] = [];
   export let utilityRoleEntries: ModelRoleDraft[] = [];
   export let visionRoleEntries: ModelRoleDraft[] = [];
@@ -64,14 +65,28 @@
   let patternEnabled = true;
   let density: 'compact' | 'comfortable' = 'compact';
   let uiScale = 100;
-  let accentColor = '#d58d2d';
+  let accentColor = '#e06c75';
   let messageWidth = 820;
   let reducedMotion = false;
+  let savedRoleSnapshots: Record<'chat' | 'utility' | 'vision', string> = {
+    chat: '',
+    utility: '',
+    vision: ''
+  };
+  let roleSnapshotsInitialized = false;
 
   $: editingProviderModels = editingProviderId
     ? providerModels.filter((model) => model.provider_id === editingProviderId)
     : [];
   $: editingProviderList = editingProviderId ? providers.filter((provider) => provider.id === editingProviderId) : [];
+  $: if (!roleSnapshotsInitialized) {
+    savedRoleSnapshots = {
+      chat: serializeRoleEntries(chatRoleEntries),
+      utility: serializeRoleEntries(utilityRoleEntries),
+      vision: serializeRoleEntries(visionRoleEntries)
+    };
+    roleSnapshotsInitialized = true;
+  }
 
   onMount(() => {
     loadAppearance();
@@ -133,9 +148,49 @@
 
   function providerTone(provider: Provider): string {
     if (!provider.enabled) return 'disabled';
+    if (provider.model_refresh_state === 'queued' || provider.model_refresh_state === 'running') return 'unknown';
     if (provider.health_status === 'healthy') return 'healthy';
     if (provider.health_status === 'unhealthy') return 'unhealthy';
     return 'unknown';
+  }
+
+  function serializeRoleEntries(entries: ModelRoleDraft[]): string {
+    return entries.map((entry) => `${entry.provider_id}:${entry.model_id}`).join('|');
+  }
+
+  function roleDirty(role: 'chat' | 'utility' | 'vision', entries: ModelRoleDraft[]): boolean {
+    return savedRoleSnapshots[role] !== '' && savedRoleSnapshots[role] !== serializeRoleEntries(entries);
+  }
+
+  async function saveRole(role: 'chat' | 'utility' | 'vision', entries: ModelRoleDraft[]): Promise<void> {
+    await onSaveModelRole(role, entries);
+    await tick();
+    if (stateFor(`model-role:${role}`) !== 'failed') {
+      savedRoleSnapshots = { ...savedRoleSnapshots, [role]: serializeRoleEntries(entries) };
+    }
+  }
+
+  function stateFor(key: string): string {
+    return actionStates[key] ?? '';
+  }
+
+  function providerRowState(provider: Provider): string {
+    return (
+      stateFor(`provider:${provider.id}:test`) ||
+      stateFor(`provider:${provider.id}:models`) ||
+      stateFor(`provider:${provider.id}:toggle`) ||
+      provider.model_refresh_state ||
+      ''
+    );
+  }
+
+  function modelRefreshLabel(provider: Provider): string {
+    const state = stateFor(`provider:${provider.id}:models`) || provider.model_refresh_state || '';
+    if (state === 'queued') return 'queued';
+    if (state === 'running' || state === 'refreshing') return 'refreshing';
+    if (state === 'succeeded') return 'succeeded';
+    if (state === 'failed') return 'failed';
+    return '';
   }
 
   function editProvider(provider: Provider): void {
@@ -333,7 +388,17 @@
             <input bind:value={providerFallbackModel} placeholder="Full model ID" />
           </label>
         {/if}
-        <button disabled={submitting} type="submit">{editingProviderId ? 'Save provider' : strings.providers.add}</button>
+        <div class="span-2 provider-form-actions">
+          {#if editingProviderId}
+            <button disabled={submitting || stateFor(`provider:${editingProviderId}:test`) === 'testing'} on:click={() => onTestProvider(editingProviderId)} type="button">
+              <Icon name="check" size={13} />
+              {stateFor(`provider:${editingProviderId}:test`) === 'testing' ? 'Testing...' : 'Test'}
+            </button>
+          {/if}
+          <button disabled={submitting || stateFor('provider-form') === 'saving'} type="submit">
+            {stateFor('provider-form') === 'saving' ? 'Saving...' : editingProviderId ? 'Save provider' : strings.providers.add}
+          </button>
+        </div>
       </form>
     {:else if activeSection === 'providers'}
       <div class="settings-panel-heading">
@@ -355,15 +420,29 @@
                   {provider.model_count ?? providerModelsFor(provider.id).length} cached
                   {provider.model_refresh_completed_at ? ` · refreshed ${new Date(provider.model_refresh_completed_at).toLocaleString()}` : ''}
                 </small>
+                {#if providerRowState(provider)}
+                  <small class={`row-state state-${providerRowState(provider)}`}>
+                    {providerRowState(provider)}
+                    {#if provider.model_refresh_duration_ms}
+                      · {Math.round(provider.model_refresh_duration_ms / 1000)}s
+                    {/if}
+                  </small>
+                {/if}
                 {#if provider.last_error || provider.model_refresh_error_message}
                   <small class="danger-text">{provider.last_error || provider.model_refresh_error_message}</small>
                 {/if}
               </div>
               <div class="row-actions">
                 <button on:click={() => editProvider(provider)} type="button">Edit</button>
-                <button on:click={() => onToggleProviderEnabled(provider)} type="button">{provider.enabled ? 'Disable' : 'Enable'}</button>
-                <button on:click={() => onTestProvider(provider.id)} type="button">{strings.providers.test}</button>
-                <button on:click={() => onRefreshProviderModels(provider.id)} type="button">Refresh models</button>
+                <button disabled={stateFor(`provider:${provider.id}:toggle`) === 'enabling' || stateFor(`provider:${provider.id}:toggle`) === 'disabling'} on:click={() => onToggleProviderEnabled(provider)} type="button">
+                  {stateFor(`provider:${provider.id}:toggle`) || (provider.enabled ? 'Disable' : 'Enable')}
+                </button>
+                <button disabled={stateFor(`provider:${provider.id}:test`) === 'testing'} on:click={() => onTestProvider(provider.id)} type="button">
+                  {stateFor(`provider:${provider.id}:test`) === 'testing' ? 'Testing...' : strings.providers.test}
+                </button>
+                <button disabled={modelRefreshLabel(provider) === 'refreshing' || modelRefreshLabel(provider) === 'queued'} on:click={() => onRefreshProviderModels(provider.id)} type="button">
+                  {modelRefreshLabel(provider) === 'refreshing' || modelRefreshLabel(provider) === 'queued' ? modelRefreshLabel(provider) : 'Refresh models'}
+                </button>
                 <button class="danger" on:click={() => onDeleteProvider(provider.id)} type="button">Delete</button>
               </div>
             </article>
@@ -391,7 +470,9 @@
               role="chat"
             />
           {/each}
-          <button on:click={() => onSaveModelRole('chat', chatRoleEntries)} type="button">Save Chat Chain</button>
+          <button class:dirty={roleDirty('chat', chatRoleEntries)} disabled={stateFor('model-role:chat') === 'saving'} on:click={() => saveRole('chat', chatRoleEntries)} type="button">
+            {stateFor('model-role:chat') === 'saving' ? 'Saving...' : stateFor('model-role:chat') === 'saved' ? 'Saved' : roleDirty('chat', chatRoleEntries) ? 'Save Chat Chain*' : 'Save Chat Chain'}
+          </button>
         </section>
         <section>
           <header>
@@ -408,7 +489,9 @@
               role="utility"
             />
           {/each}
-          <button on:click={() => onSaveModelRole('utility', utilityRoleEntries)} type="button">Save Utility Chain</button>
+          <button class:dirty={roleDirty('utility', utilityRoleEntries)} disabled={stateFor('model-role:utility') === 'saving'} on:click={() => saveRole('utility', utilityRoleEntries)} type="button">
+            {stateFor('model-role:utility') === 'saving' ? 'Saving...' : stateFor('model-role:utility') === 'saved' ? 'Saved' : roleDirty('utility', utilityRoleEntries) ? 'Save Utility Chain*' : 'Save Utility Chain'}
+          </button>
         </section>
         <section>
           <header>
@@ -425,7 +508,9 @@
               role="vision"
             />
           {/each}
-          <button on:click={() => onSaveModelRole('vision', visionRoleEntries)} type="button">Save Vision Chain</button>
+          <button class:dirty={roleDirty('vision', visionRoleEntries)} disabled={stateFor('model-role:vision') === 'saving'} on:click={() => saveRole('vision', visionRoleEntries)} type="button">
+            {stateFor('model-role:vision') === 'saving' ? 'Saving...' : stateFor('model-role:vision') === 'saved' ? 'Saved' : roleDirty('vision', visionRoleEntries) ? 'Save Vision Chain*' : 'Save Vision Chain'}
+          </button>
         </section>
       </div>
     {:else if activeSection === 'appearance'}

@@ -4,6 +4,7 @@
   import { marked } from 'marked';
   import AppShell from '../app/shell/AppShell.svelte';
   import Notice from '../components/common/Notice.svelte';
+  import ToastCenter, { type AppToast, type ToastType } from '../components/common/ToastCenter.svelte';
   import WorkspaceWindow from '../components/common/WorkspaceWindow.svelte';
   import type { IconName } from '../components/common/Icon.svelte';
   import AgentsView from './AgentsView.svelte';
@@ -123,6 +124,10 @@
   let submitting = false;
   let notice = '';
   let errorMessage = '';
+  let streamState: 'idle' | 'connecting' | 'streaming' | 'completed' | 'failed' | 'cancelled' = 'idle';
+  let toasts: AppToast[] = [];
+  let actionStates: Record<string, string> = {};
+  let toastCounter = 0;
 
   $: selectedConversation = conversations.find((conversation) => conversation.id === selectedConversationId);
 
@@ -224,6 +229,82 @@
   onMount(async () => {
     await refreshAppState();
   });
+
+  function addToast(type: ToastType, message: string, options: Partial<AppToast> & { timeoutMS?: number } = {}): string {
+    const id = `toast-${Date.now()}-${toastCounter}`;
+    toastCounter += 1;
+    const toast: AppToast = {
+      id,
+      type,
+      message,
+      actionLabel: options.actionLabel,
+      onAction: options.onAction,
+      persistent: options.persistent
+    };
+    toasts = [toast, ...toasts].slice(0, 5);
+    const timeoutMS =
+      options.timeoutMS ??
+      (type === 'success' ? 3200 : type === 'info' ? 4200 : type === 'warning' ? 6500 : type === 'loading' ? 0 : 0);
+    if (timeoutMS > 0 && !toast.persistent) {
+      window.setTimeout(() => dismissToast(id), timeoutMS);
+    }
+    return id;
+  }
+
+  function dismissToast(toastId: string): void {
+    toasts = toasts.filter((toast) => toast.id !== toastId);
+  }
+
+  function notifySuccess(message: string): void {
+    notice = message;
+    addToast('success', message);
+  }
+
+  function notifyInfo(message: string): void {
+    notice = message;
+    addToast('info', message);
+  }
+
+  function notifyError(message: string, retry: (() => void | Promise<void>) | undefined = undefined): void {
+    errorMessage = message;
+    addToast('error', message, {
+      actionLabel: retry ? 'Retry' : undefined,
+      onAction: retry,
+      persistent: true
+    });
+  }
+
+  function setActionState(key: string, state: string): void {
+    actionStates = { ...actionStates, [key]: state };
+  }
+
+  function clearActionState(key: string, state: string, delayMS = 1800): void {
+    window.setTimeout(() => {
+      if (actionStates[key] !== state) return;
+      const next = { ...actionStates };
+      delete next[key];
+      actionStates = next;
+    }, delayMS);
+  }
+
+  function applyProviderRefreshStatus(refresh: ModelRefreshResponse['refresh']): void {
+    providers = providers.map((provider) =>
+      provider.id === refresh.provider_id
+        ? {
+            ...provider,
+            model_refresh_state: refresh.state,
+            model_refresh_started_at: refresh.started_at,
+            model_refresh_completed_at: refresh.completed_at,
+            model_refresh_duration_ms: refresh.duration_ms,
+            model_refresh_error_category: refresh.error_category,
+            model_refresh_error_message: refresh.error_message,
+            model_count: refresh.cached_model_count,
+            available_model_count: refresh.available_model_count,
+            unavailable_model_count: refresh.unavailable_model_count
+          }
+        : provider
+    );
+  }
 
   async function refreshAppState(): Promise<void> {
     loading = true;
@@ -386,28 +467,40 @@
   }
 
   async function saveModelRole(role: 'chat' | 'utility' | 'vision', entries: ModelRoleDraft[]): Promise<void> {
+    const stateKey = `model-role:${role}`;
     const hasIncompleteEntry = entries.some((entry) => {
       const hasProvider = Boolean(entry.provider_id.trim());
       const hasModel = Boolean(entry.model_id.trim());
       return hasProvider !== hasModel;
     });
     if (hasIncompleteEntry) {
-      errorMessage = 'Each model role entry must include both a provider and a model ID.';
+      setActionState(stateKey, 'failed');
+      notifyError('Each model role entry must include both a provider and a model ID.');
       return;
     }
     const models = entries
       .map((entry) => ({ provider_id: entry.provider_id.trim(), model_id: entry.model_id.trim() }))
       .filter((entry) => entry.provider_id && entry.model_id);
-    const response = await putJSON<ModelRolesResponse>(`/api/v1/model-roles/${role}`, {
-      models
-    });
-    modelRoles = response.roles ?? [];
-    notice = `${role} model chain saved.`;
-    await refreshModelRoles();
+    setActionState(stateKey, 'saving');
+    try {
+      const response = await putJSON<ModelRolesResponse>(`/api/v1/model-roles/${role}`, {
+        models
+      });
+      modelRoles = response.roles ?? [];
+      await refreshModelRoles();
+      setActionState(stateKey, 'saved');
+      clearActionState(stateKey, 'saved');
+      notifySuccess(`${role} model chain saved.`);
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => saveModelRole(role, entries));
+    }
   }
 
   async function createProvider(): Promise<void> {
+    const stateKey = 'provider-form';
     submitting = true;
+    setActionState(stateKey, 'saving');
     errorMessage = '';
     notice = '';
     try {
@@ -429,13 +522,19 @@
       const response = providerBeingEdited
         ? await putJSON<ProviderResponse>(`/api/v1/providers/${providerBeingEdited}`, payload)
         : await postJSON<ProviderResponse>('/api/v1/providers', payload);
+      providers = providerBeingEdited
+        ? providers.map((provider) => (provider.id === response.provider.id ? response.provider : provider))
+        : [response.provider, ...providers];
       resetProviderForm();
       selectedProviderId = response.provider.id;
       selectedModel = response.provider.default_model ?? '';
       await refreshProviders();
-      notice = providerBeingEdited ? 'Provider updated.' : 'Provider saved.';
+      setActionState(stateKey, 'saved');
+      clearActionState(stateKey, 'saved');
+      notifySuccess(providerBeingEdited ? 'Provider updated.' : 'Provider saved.');
     } catch (error) {
-      errorMessage = messageFromError(error);
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), createProvider);
     } finally {
       submitting = false;
     }
@@ -476,9 +575,12 @@
       return;
     }
     submitting = true;
+    setActionState(`provider:${providerId}:delete`, 'deleting');
     errorMessage = '';
     try {
       await deleteJSON<{ ok: boolean }>(`/api/v1/providers/${providerId}`);
+      providers = providers.filter((provider) => provider.id !== providerId);
+      providerModels = providerModels.filter((model) => model.provider_id !== providerId);
       if (selectedProviderId === providerId) {
         selectedProviderId = '';
         selectedModel = '';
@@ -486,10 +588,12 @@
       if (editingProviderId === providerId) {
         resetProviderForm();
       }
-      await refreshProviders();
-      notice = 'Provider deleted.';
+      setActionState(`provider:${providerId}:delete`, 'deleted');
+      clearActionState(`provider:${providerId}:delete`, 'deleted');
+      notifySuccess('Provider deleted.');
     } catch (error) {
-      errorMessage = messageFromError(error);
+      setActionState(`provider:${providerId}:delete`, 'failed');
+      notifyError(messageFromError(error), () => deleteProvider(providerId));
     } finally {
       submitting = false;
     }
@@ -497,6 +601,7 @@
 
   async function toggleProviderEnabled(provider: Provider): Promise<void> {
     submitting = true;
+    setActionState(`provider:${provider.id}:toggle`, provider.enabled ? 'disabling' : 'enabling');
     errorMessage = '';
     try {
       const response = await putJSON<ProviderResponse>(`/api/v1/providers/${provider.id}`, {
@@ -512,9 +617,12 @@
         fallback_model: provider.fallback_model ?? ''
       });
       providers = providers.map((item) => (item.id === provider.id ? response.provider : item));
-      notice = response.provider.enabled ? 'Provider enabled.' : 'Provider disabled.';
+      setActionState(`provider:${provider.id}:toggle`, response.provider.enabled ? 'enabled' : 'disabled');
+      clearActionState(`provider:${provider.id}:toggle`, response.provider.enabled ? 'enabled' : 'disabled');
+      notifySuccess(response.provider.enabled ? 'Provider enabled.' : 'Provider disabled.');
     } catch (error) {
-      errorMessage = messageFromError(error);
+      setActionState(`provider:${provider.id}:toggle`, 'failed');
+      notifyError(messageFromError(error), () => toggleProviderEnabled(provider));
     } finally {
       submitting = false;
     }
@@ -522,13 +630,18 @@
 
   async function testProvider(providerId: string): Promise<void> {
     submitting = true;
+    const stateKey = `provider:${providerId}:test`;
+    setActionState(stateKey, 'testing');
     errorMessage = '';
     try {
       await postJSON<{ ok: boolean }>(`/api/v1/providers/${providerId}/test`);
       await refreshProviders();
-      notice = 'Provider connection succeeded.';
+      setActionState(stateKey, 'connected');
+      clearActionState(stateKey, 'connected');
+      notifySuccess('Provider connection succeeded.');
     } catch (error) {
-      errorMessage = messageFromError(error);
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => testProvider(providerId));
     } finally {
       submitting = false;
     }
@@ -536,14 +649,18 @@
 
   async function refreshProviderModels(providerId: string): Promise<void> {
     submitting = true;
+    const stateKey = `provider:${providerId}:models`;
+    setActionState(stateKey, 'refreshing');
     errorMessage = '';
     try {
       selectedProviderId = providerId;
-      await postJSON<ModelRefreshResponse>(`/api/v1/providers/${providerId}/models/refresh`);
-      notice = 'Model refresh started.';
+      const started = await postJSON<ModelRefreshResponse>(`/api/v1/providers/${providerId}/models/refresh`);
+      applyProviderRefreshStatus(started.refresh);
+      notifyInfo('Model refresh started.');
       for (let attempt = 0; attempt < 60; attempt += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
         const status = await getJSON<ModelRefreshResponse>(`/api/v1/providers/${providerId}/models/refresh-status`);
+        applyProviderRefreshStatus(status.refresh);
         if (status.refresh.state === 'succeeded') {
           await refreshModels();
           const firstModel = providerModels.find((model) => model.provider_id === providerId);
@@ -551,7 +668,9 @@
             selectedModel = firstModel.model_id;
           }
           await refreshProviders();
-          notice = 'Models refreshed.';
+          setActionState(stateKey, 'succeeded');
+          clearActionState(stateKey, 'succeeded');
+          notifySuccess('Models refreshed.');
           return;
         }
         if (status.refresh.state === 'failed') {
@@ -560,9 +679,11 @@
       }
       await refreshModels();
       await refreshProviders();
-      notice = 'Model refresh is still running.';
+      setActionState(stateKey, 'refreshing');
+      notifyInfo('Model refresh is still running.');
     } catch (error) {
-      errorMessage = messageFromError(error);
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => refreshProviderModels(providerId));
     } finally {
       submitting = false;
     }
@@ -674,20 +795,40 @@
     const content = composer;
     composer = '';
     errorMessage = '';
-    await postStream(
-      `/api/v1/conversations/${selectedConversationId}/runs`,
-      { content, provider_id: selectedProviderId, model: selectedModel },
-      handleChatEvent
-    );
-    activeRunId = '';
-    await Promise.all([refreshConversations(), selectConversation(selectedConversationId)]);
+    streamState = 'connecting';
+    try {
+      await postStream(
+        `/api/v1/conversations/${selectedConversationId}/runs`,
+        { content, provider_id: selectedProviderId, model: selectedModel },
+        handleChatEvent
+      );
+      activeRunId = '';
+      const finalStreamState = streamState as string;
+      if (finalStreamState !== 'failed' && finalStreamState !== 'cancelled') {
+        streamState = 'completed';
+      }
+      await Promise.all([refreshConversations(), selectConversation(selectedConversationId)]);
+    } catch (error) {
+      if (!activeRunId && !messages.some((message) => message.content === content && message.role === 'user')) {
+        composer = content;
+      }
+      activeRunId = '';
+      streamState = 'failed';
+      notifyError(messageFromError(error), sendMessage);
+    }
   }
 
   async function stopGeneration(): Promise<void> {
     if (!activeRunId) {
       return;
     }
-    await postJSON<{ ok: boolean }>(`/api/v1/chat-runs/${activeRunId}/cancel`);
+    try {
+      await postJSON<{ ok: boolean }>(`/api/v1/chat-runs/${activeRunId}/cancel`);
+      streamState = 'cancelled';
+      notifyInfo('Generation stopped.');
+    } catch (error) {
+      notifyError(messageFromError(error), stopGeneration);
+    }
   }
 
   async function refreshPendingToolApprovals(): Promise<void> {
@@ -729,6 +870,7 @@
   function handleChatEvent(event: string, payload: unknown): void {
     if (event === 'run_started' && isRunStarted(payload)) {
       activeRunId = payload.run.id;
+      streamState = 'streaming';
       runMemories = [];
       toolCards = [];
       messages = [...messages, payload.user_message, payload.assistant_message];
@@ -760,6 +902,13 @@
     }
     if (event === 'run_completed' || event === 'run_failed' || event === 'run_cancelled') {
       activeRunId = '';
+      streamState = event === 'run_completed' ? 'completed' : event === 'run_cancelled' ? 'cancelled' : 'failed';
+      if (event === 'run_failed') {
+        notifyError('Generation failed. The conversation was kept so you can retry.');
+      }
+      if (event === 'run_cancelled') {
+        notifyInfo('Generation stopped.');
+      }
     }
   }
 
@@ -792,30 +941,39 @@
   }
 
   async function createAgent(): Promise<void> {
-    const payload = {
-      name: agentName,
-      description: agentDescription,
-      avatar: agentAvatar,
-      system_prompt: agentPrompt,
-      default_provider_id: agentDefaultProviderId,
-      default_model: agentDefaultModel,
-      fallback_model: agentFallbackModel,
-      temperature: agentTemperature,
-      max_tool_iterations: agentMaxToolIterations,
-      memory_access_mode: agentMemoryMode,
-      tool_permission_default: agentToolPermissionDefault,
-      active: agentActive
-    };
-    const agentBeingEdited = editingAgentId;
-    const response = agentBeingEdited
-      ? await putJSON<AgentResponse>(`/api/v1/agents/${agentBeingEdited}`, payload)
-      : await postJSON<AgentResponse>('/api/v1/agents', payload);
-    agents = agentBeingEdited
-      ? agents.map((agent) => (agent.id === response.agent.id ? response.agent : agent))
-      : [response.agent, ...agents];
-    selectedAgentId = response.agent.id;
-    resetAgentForm();
-    notice = agentBeingEdited ? 'Agent updated.' : 'Agent saved.';
+    const stateKey = 'agent-form';
+    setActionState(stateKey, 'saving');
+    try {
+      const payload = {
+        name: agentName,
+        description: agentDescription,
+        avatar: agentAvatar,
+        system_prompt: agentPrompt,
+        default_provider_id: agentDefaultProviderId,
+        default_model: agentDefaultModel,
+        fallback_model: agentFallbackModel,
+        temperature: agentTemperature,
+        max_tool_iterations: agentMaxToolIterations,
+        memory_access_mode: agentMemoryMode,
+        tool_permission_default: agentToolPermissionDefault,
+        active: agentActive
+      };
+      const agentBeingEdited = editingAgentId;
+      const response = agentBeingEdited
+        ? await putJSON<AgentResponse>(`/api/v1/agents/${agentBeingEdited}`, payload)
+        : await postJSON<AgentResponse>('/api/v1/agents', payload);
+      agents = agentBeingEdited
+        ? agents.map((agent) => (agent.id === response.agent.id ? response.agent : agent))
+        : [response.agent, ...agents];
+      selectedAgentId = response.agent.id;
+      resetAgentForm();
+      setActionState(stateKey, 'saved');
+      clearActionState(stateKey, 'saved');
+      notifySuccess(agentBeingEdited ? 'Agent updated.' : 'Agent saved.');
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), createAgent);
+    }
   }
 
   function editAgent(agent: Agent): void {
@@ -851,36 +1009,65 @@
   }
 
   async function duplicateAgent(agentId: string): Promise<void> {
-    const response = await postJSON<AgentResponse>(`/api/v1/agents/${agentId}/duplicate`);
-    agents = [response.agent, ...agents];
-    notice = 'Agent duplicated.';
+    setActionState(`agent:${agentId}:duplicate`, 'saving');
+    try {
+      const response = await postJSON<AgentResponse>(`/api/v1/agents/${agentId}/duplicate`);
+      agents = [response.agent, ...agents];
+      setActionState(`agent:${agentId}:duplicate`, 'saved');
+      clearActionState(`agent:${agentId}:duplicate`, 'saved');
+      notifySuccess('Agent duplicated.');
+    } catch (error) {
+      setActionState(`agent:${agentId}:duplicate`, 'failed');
+      notifyError(messageFromError(error), () => duplicateAgent(agentId));
+    }
   }
 
   async function deleteAgent(agentId: string): Promise<void> {
     if (!confirm('Delete this agent? Existing conversations keep their messages.')) {
       return;
     }
-    await deleteJSON<{ ok: boolean }>(`/api/v1/agents/${agentId}`);
-    await refreshAgents();
+    setActionState(`agent:${agentId}:delete`, 'deleting');
+    try {
+      await deleteJSON<{ ok: boolean }>(`/api/v1/agents/${agentId}`);
+      agents = agents.filter((agent) => agent.id !== agentId);
+      if (selectedAgentId === agentId) {
+        selectedAgentId = agents[0]?.id ?? '';
+      }
+      setActionState(`agent:${agentId}:delete`, 'deleted');
+      clearActionState(`agent:${agentId}:delete`, 'deleted');
+      notifySuccess('Agent deleted.');
+    } catch (error) {
+      setActionState(`agent:${agentId}:delete`, 'failed');
+      notifyError(messageFromError(error), () => deleteAgent(agentId));
+    }
   }
 
   async function toggleAgentActive(agent: Agent): Promise<void> {
-    const response = await putJSON<AgentResponse>(`/api/v1/agents/${agent.id}`, {
-      name: agent.name,
-      description: agent.description,
-      avatar: agent.avatar,
-      system_prompt: agent.system_prompt,
-      default_provider_id: agent.default_provider_id ?? '',
-      default_model: agent.default_model ?? '',
-      fallback_model: agent.fallback_model ?? '',
-      temperature: agent.temperature,
-      max_tool_iterations: agent.max_tool_iterations,
-      memory_access_mode: agent.memory_access_mode,
-      tool_permission_default: agent.tool_permission_default,
-      active: !agent.active
-    });
-    agents = agents.map((item) => (item.id === agent.id ? response.agent : item));
-    notice = response.agent.active ? 'Agent enabled.' : 'Agent disabled.';
+    const stateKey = `agent:${agent.id}:toggle`;
+    setActionState(stateKey, agent.active ? 'disabling' : 'enabling');
+    try {
+      const response = await putJSON<AgentResponse>(`/api/v1/agents/${agent.id}`, {
+        name: agent.name,
+        description: agent.description,
+        avatar: agent.avatar,
+        system_prompt: agent.system_prompt,
+        default_provider_id: agent.default_provider_id ?? '',
+        default_model: agent.default_model ?? '',
+        fallback_model: agent.fallback_model ?? '',
+        temperature: agent.temperature,
+        max_tool_iterations: agent.max_tool_iterations,
+        memory_access_mode: agent.memory_access_mode,
+        tool_permission_default: agent.tool_permission_default,
+        active: !agent.active
+      });
+      agents = agents.map((item) => (item.id === agent.id ? response.agent : item));
+      setActionState(stateKey, response.agent.active ? 'enabled' : 'disabled');
+      clearActionState(stateKey, response.agent.active ? 'enabled' : 'disabled');
+      notifySuccess(response.agent.active ? 'Agent enabled.' : 'Agent disabled.');
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => toggleAgentActive(agent));
+    }
   }
 
   function testAgent(agent: Agent): void {
@@ -896,28 +1083,37 @@
   }
 
   async function createMemory(): Promise<void> {
-    const payload = {
-      title: memoryTitle,
-      content: memoryContent,
-      tags: memoryTags
-        .split(',')
-        .map((tag) => tag.trim())
-        .filter(Boolean),
-      scope: memoryScope,
-      importance: memoryImportance,
-      pinned: memoryPinned,
-      active: memoryActive,
-      source: 'manual'
-    };
-    const memoryBeingEdited = editingMemoryId;
-    const response = memoryBeingEdited
-      ? await putJSON<MemoryResponse>(`/api/v1/memories/${memoryBeingEdited}`, payload)
-      : await postJSON<MemoryResponse>('/api/v1/memories', payload);
-    memories = memoryBeingEdited
-      ? memories.map((memory) => (memory.id === response.memory.id ? response.memory : memory))
-      : [response.memory, ...memories];
-    resetMemoryForm();
-    notice = memoryBeingEdited ? 'Memory updated.' : 'Memory saved.';
+    const stateKey = 'memory-form';
+    setActionState(stateKey, 'saving');
+    try {
+      const payload = {
+        title: memoryTitle,
+        content: memoryContent,
+        tags: memoryTags
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+        scope: memoryScope,
+        importance: memoryImportance,
+        pinned: memoryPinned,
+        active: memoryActive,
+        source: 'manual'
+      };
+      const memoryBeingEdited = editingMemoryId;
+      const response = memoryBeingEdited
+        ? await putJSON<MemoryResponse>(`/api/v1/memories/${memoryBeingEdited}`, payload)
+        : await postJSON<MemoryResponse>('/api/v1/memories', payload);
+      memories = memoryBeingEdited
+        ? memories.map((memory) => (memory.id === response.memory.id ? response.memory : memory))
+        : [response.memory, ...memories];
+      resetMemoryForm();
+      setActionState(stateKey, 'saved');
+      clearActionState(stateKey, 'saved');
+      notifySuccess(memoryBeingEdited ? 'Memory updated.' : 'Memory saved.');
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), createMemory);
+    }
   }
 
   function editMemory(memory: Memory): void {
@@ -946,11 +1142,20 @@
     if (!confirm('Delete this memory?')) {
       return;
     }
-    await deleteJSON<{ ok: boolean }>(`/api/v1/memories/${memoryId}`);
-    if (editingMemoryId === memoryId) {
-      resetMemoryForm();
+    setActionState(`memory:${memoryId}:delete`, 'deleting');
+    try {
+      await deleteJSON<{ ok: boolean }>(`/api/v1/memories/${memoryId}`);
+      if (editingMemoryId === memoryId) {
+        resetMemoryForm();
+      }
+      memories = memories.filter((memory) => memory.id !== memoryId);
+      setActionState(`memory:${memoryId}:delete`, 'deleted');
+      clearActionState(`memory:${memoryId}:delete`, 'deleted');
+      notifySuccess('Memory deleted.');
+    } catch (error) {
+      setActionState(`memory:${memoryId}:delete`, 'failed');
+      notifyError(messageFromError(error), () => deleteMemory(memoryId));
     }
-    await refreshMemories();
   }
 
   async function updateMemoryFlags(memory: Memory, flags: Pick<Memory, 'active' | 'pinned'>): Promise<void> {
@@ -971,13 +1176,31 @@
   }
 
   async function toggleMemoryActive(memory: Memory): Promise<void> {
-    await updateMemoryFlags(memory, { active: !memory.active, pinned: memory.pinned });
-    notice = memory.active ? 'Memory disabled.' : 'Memory enabled.';
+    const stateKey = `memory:${memory.id}:active`;
+    setActionState(stateKey, memory.active ? 'disabling' : 'enabling');
+    try {
+      await updateMemoryFlags(memory, { active: !memory.active, pinned: memory.pinned });
+      setActionState(stateKey, memory.active ? 'disabled' : 'enabled');
+      clearActionState(stateKey, memory.active ? 'disabled' : 'enabled');
+      notifySuccess(memory.active ? 'Memory disabled.' : 'Memory enabled.');
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => toggleMemoryActive(memory));
+    }
   }
 
   async function toggleMemoryPinned(memory: Memory): Promise<void> {
-    await updateMemoryFlags(memory, { active: memory.active, pinned: !memory.pinned });
-    notice = memory.pinned ? 'Memory unpinned.' : 'Memory pinned.';
+    const stateKey = `memory:${memory.id}:pinned`;
+    setActionState(stateKey, memory.pinned ? 'unpinning' : 'pinning');
+    try {
+      await updateMemoryFlags(memory, { active: memory.active, pinned: !memory.pinned });
+      setActionState(stateKey, memory.pinned ? 'unpinned' : 'pinned');
+      clearActionState(stateKey, memory.pinned ? 'unpinned' : 'pinned');
+      notifySuccess(memory.pinned ? 'Memory unpinned.' : 'Memory pinned.');
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => toggleMemoryPinned(memory));
+    }
   }
 
   async function rememberMessage(message: Message): Promise<void> {
@@ -994,7 +1217,7 @@
       source_message_id: message.id
     });
     memories = [response.memory, ...memories];
-    notice = 'Memory created from message.';
+    notifySuccess('Memory created from message.');
   }
 
   async function refreshMCP(): Promise<void> {
@@ -1007,33 +1230,42 @@
   }
 
   async function createMCPServer(): Promise<void> {
-    const headers = parseHeaderText(mcpHttpHeaders);
-    if (mcpAuthorization.trim()) {
-      headers.Authorization = mcpAuthorization.trim();
+    const stateKey = 'mcp-form';
+    setActionState(stateKey, 'saving');
+    try {
+      const headers = parseHeaderText(mcpHttpHeaders);
+      if (mcpAuthorization.trim()) {
+        headers.Authorization = mcpAuthorization.trim();
+      }
+      const payload = {
+        name: mcpName,
+        description: mcpDescription,
+        transport_type: mcpTransport,
+        http_url: mcpHttpUrl,
+        command: mcpCommand,
+        arguments: mcpArguments.split(' ').filter(Boolean),
+        working_directory: mcpWorkingDirectory,
+        http_headers: headers,
+        environment: parseHeaderText(mcpEnvironment),
+        enabled: mcpEnabled,
+        startup_timeout_ms: mcpStartupTimeoutMS,
+        request_timeout_ms: mcpRequestTimeoutMS
+      };
+      const serverBeingEdited = editingMCPServerId;
+      const response = serverBeingEdited
+        ? await putJSON<MCPServerResponse>(`/api/v1/mcp-servers/${serverBeingEdited}`, payload)
+        : await postJSON<MCPServerResponse>('/api/v1/mcp-servers', payload);
+      mcpServers = serverBeingEdited
+        ? mcpServers.map((server) => (server.id === response.server.id ? response.server : server))
+        : [response.server, ...mcpServers];
+      resetMCPServerForm();
+      setActionState(stateKey, 'saved');
+      clearActionState(stateKey, 'saved');
+      notifySuccess(serverBeingEdited ? 'MCP server updated.' : 'MCP server saved.');
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), createMCPServer);
     }
-    const payload = {
-      name: mcpName,
-      description: mcpDescription,
-      transport_type: mcpTransport,
-      http_url: mcpHttpUrl,
-      command: mcpCommand,
-      arguments: mcpArguments.split(' ').filter(Boolean),
-      working_directory: mcpWorkingDirectory,
-      http_headers: headers,
-      environment: parseHeaderText(mcpEnvironment),
-      enabled: mcpEnabled,
-      startup_timeout_ms: mcpStartupTimeoutMS,
-      request_timeout_ms: mcpRequestTimeoutMS
-    };
-    const serverBeingEdited = editingMCPServerId;
-    const response = serverBeingEdited
-      ? await putJSON<MCPServerResponse>(`/api/v1/mcp-servers/${serverBeingEdited}`, payload)
-      : await postJSON<MCPServerResponse>('/api/v1/mcp-servers', payload);
-    mcpServers = serverBeingEdited
-      ? mcpServers.map((server) => (server.id === response.server.id ? response.server : server))
-      : [response.server, ...mcpServers];
-    resetMCPServerForm();
-    notice = serverBeingEdited ? 'MCP server updated.' : 'MCP server saved.';
   }
 
   function editMCPServer(server: MCPServer): void {
@@ -1074,30 +1306,64 @@
     if (!confirm('Delete this MCP server and its discovered tools?')) {
       return;
     }
-    await deleteJSON<{ ok: boolean }>(`/api/v1/mcp-servers/${serverId}`);
-    if (editingMCPServerId === serverId) {
-      resetMCPServerForm();
+    setActionState(`mcp:${serverId}:delete`, 'deleting');
+    try {
+      await deleteJSON<{ ok: boolean }>(`/api/v1/mcp-servers/${serverId}`);
+      if (editingMCPServerId === serverId) {
+        resetMCPServerForm();
+      }
+      mcpServers = mcpServers.filter((server) => server.id !== serverId);
+      mcpTools = mcpTools.filter((tool) => tool.server_id !== serverId);
+      setActionState(`mcp:${serverId}:delete`, 'deleted');
+      clearActionState(`mcp:${serverId}:delete`, 'deleted');
+      notifySuccess('MCP server deleted.');
+    } catch (error) {
+      setActionState(`mcp:${serverId}:delete`, 'failed');
+      notifyError(messageFromError(error), () => deleteMCPServer(serverId));
     }
-    await refreshMCP();
-    notice = 'MCP server deleted.';
   }
 
   async function discoverMCPTools(serverId: string): Promise<void> {
-    const response = await postJSON<MCPToolsResponse>(`/api/v1/mcp-servers/${serverId}/discover`);
-    mcpTools = [...(response.tools ?? []), ...mcpTools.filter((tool) => tool.server_id !== serverId)];
-    await refreshMCP();
-    notice = 'MCP tools discovered.';
+    const stateKey = `mcp:${serverId}:discover`;
+    setActionState(stateKey, 'discovering');
+    try {
+      const response = await postJSON<MCPToolsResponse>(`/api/v1/mcp-servers/${serverId}/discover`);
+      mcpTools = [...(response.tools ?? []), ...mcpTools.filter((tool) => tool.server_id !== serverId)];
+      await refreshMCP();
+      setActionState(stateKey, 'succeeded');
+      clearActionState(stateKey, 'succeeded');
+      notifySuccess('MCP tools discovered.');
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => discoverMCPTools(serverId));
+    }
   }
 
   async function testMCPServer(serverId: string): Promise<void> {
-    await postJSON<MCPToolsResponse>(`/api/v1/mcp-servers/${serverId}/test`);
-    await refreshMCP();
-    notice = 'MCP server connection tested.';
+    const stateKey = `mcp:${serverId}:test`;
+    setActionState(stateKey, 'testing');
+    try {
+      await postJSON<MCPToolsResponse>(`/api/v1/mcp-servers/${serverId}/test`);
+      await refreshMCP();
+      setActionState(stateKey, 'connected');
+      clearActionState(stateKey, 'connected');
+      notifySuccess('MCP server connection tested.');
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => testMCPServer(serverId));
+    }
   }
 
   async function updateToolPermission(toolId: string, permissionMode: string): Promise<void> {
-    await putJSON<{ ok: boolean }>(`/api/v1/mcp-tools/${toolId}/permission`, { permission_mode: permissionMode });
-    await refreshMCP();
+    const previousTools = mcpTools;
+    mcpTools = mcpTools.map((tool) => (tool.id === toolId ? { ...tool, permission_mode: permissionMode } : tool));
+    try {
+      await putJSON<{ ok: boolean }>(`/api/v1/mcp-tools/${toolId}/permission`, { permission_mode: permissionMode });
+      notifySuccess('Tool permission updated.');
+    } catch (error) {
+      mcpTools = previousTools;
+      notifyError(messageFromError(error), () => updateToolPermission(toolId, permissionMode));
+    }
   }
 
   async function refreshTasks(): Promise<void> {
@@ -1110,7 +1376,9 @@
   }
 
   async function createTask(): Promise<void> {
+    const stateKey = 'task-form';
     submitting = true;
+    setActionState(stateKey, 'saving');
     errorMessage = '';
     notice = '';
     try {
@@ -1142,9 +1410,12 @@
         ? taskRecords.map((item) => (item.task.id === response.task.id ? record : item))
         : [record, ...taskRecords];
       resetTaskForm();
-      notice = taskBeingEdited ? 'Task updated.' : 'Task saved.';
+      setActionState(stateKey, 'saved');
+      clearActionState(stateKey, 'saved');
+      notifySuccess(taskBeingEdited ? 'Task updated.' : 'Task saved.');
     } catch (error) {
-      errorMessage = messageFromError(error);
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), createTask);
     } finally {
       submitting = false;
     }
@@ -1194,56 +1465,118 @@
     if (!confirm('Delete this task and its schedules? Existing run history will be removed.')) {
       return;
     }
-    await deleteJSON<{ ok: boolean }>(`/api/v1/tasks/${taskId}`);
-    if (editingTaskId === taskId) {
-      resetTaskForm();
+    setActionState(`task:${taskId}:delete`, 'deleting');
+    try {
+      await deleteJSON<{ ok: boolean }>(`/api/v1/tasks/${taskId}`);
+      if (editingTaskId === taskId) {
+        resetTaskForm();
+      }
+      taskRecords = taskRecords.filter((record) => record.task.id !== taskId);
+      taskRuns = taskRuns.filter((run) => run.task_id !== taskId);
+      setActionState(`task:${taskId}:delete`, 'deleted');
+      clearActionState(`task:${taskId}:delete`, 'deleted');
+      notifySuccess('Task deleted.');
+    } catch (error) {
+      setActionState(`task:${taskId}:delete`, 'failed');
+      notifyError(messageFromError(error), () => deleteTask(taskId));
     }
-    await refreshTasks();
-    notice = 'Task deleted.';
   }
 
   async function toggleTaskState(record: TaskRecord): Promise<void> {
     const nextState = record.task.state === 'enabled' ? 'disabled' : 'enabled';
-    const response = await putJSON<TaskResponse>(`/api/v1/tasks/${record.task.id}`, {
-      name: record.task.name,
-      description: record.task.description,
-      task_type: record.task.task_type,
-      state: nextState,
-      agent_id: record.task.agent_id ?? '',
-      provider_id: record.task.provider_id ?? '',
-      model: record.task.model ?? '',
-      prompt: record.task.prompt,
-      tool_policy: record.task.tool_policy,
-      max_retries: record.task.max_retries,
-      timeout_ms: record.task.timeout_ms,
-      concurrency_policy: record.task.concurrency_policy,
-      schedule_mode: record.schedule.mode,
-      cron_expression: record.schedule.cron_expression ?? '',
-      interval_seconds: record.schedule.interval_seconds ?? 0,
-      run_at: record.schedule.run_at ?? '',
-      timezone: record.schedule.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-    });
-    const nextRecord = { task: response.task, schedule: response.schedule };
-    taskRecords = taskRecords.map((item) => (item.task.id === response.task.id ? nextRecord : item));
-    notice = nextState === 'enabled' ? 'Task enabled.' : 'Task disabled.';
+    const stateKey = `task:${record.task.id}:toggle`;
+    setActionState(stateKey, nextState === 'enabled' ? 'enabling' : 'disabling');
+    try {
+      const response = await putJSON<TaskResponse>(`/api/v1/tasks/${record.task.id}`, {
+        name: record.task.name,
+        description: record.task.description,
+        task_type: record.task.task_type,
+        state: nextState,
+        agent_id: record.task.agent_id ?? '',
+        provider_id: record.task.provider_id ?? '',
+        model: record.task.model ?? '',
+        prompt: record.task.prompt,
+        tool_policy: record.task.tool_policy,
+        max_retries: record.task.max_retries,
+        timeout_ms: record.task.timeout_ms,
+        concurrency_policy: record.task.concurrency_policy,
+        schedule_mode: record.schedule.mode,
+        cron_expression: record.schedule.cron_expression ?? '',
+        interval_seconds: record.schedule.interval_seconds ?? 0,
+        run_at: record.schedule.run_at ?? '',
+        timezone: record.schedule.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      });
+      const nextRecord = { task: response.task, schedule: response.schedule };
+      taskRecords = taskRecords.map((item) => (item.task.id === response.task.id ? nextRecord : item));
+      setActionState(stateKey, nextState);
+      clearActionState(stateKey, nextState);
+      notifySuccess(nextState === 'enabled' ? 'Task enabled.' : 'Task disabled.');
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => toggleTaskState(record));
+    }
   }
 
   async function runTask(taskId: string): Promise<void> {
-    const response = await postJSON<TaskRunResponse>(`/api/v1/tasks/${taskId}/run`);
-    taskRuns = [response.run, ...taskRuns];
-    notice = 'Task queued.';
+    const stateKey = `task:${taskId}:run`;
+    setActionState(stateKey, 'queued');
+    try {
+      const response = await postJSON<TaskRunResponse>(`/api/v1/tasks/${taskId}/run`);
+      taskRuns = [response.run, ...taskRuns];
+      notifyInfo('Task queued.');
+      void pollTaskRun(response.run.id, stateKey);
+    } catch (error) {
+      setActionState(stateKey, 'failed');
+      notifyError(messageFromError(error), () => runTask(taskId));
+    }
   }
 
   async function cancelTaskRun(runId: string): Promise<void> {
-    await postJSON<{ ok: boolean }>(`/api/v1/task-runs/${runId}/cancel`);
-    await refreshTasks();
-    notice = 'Task run cancelled.';
+    try {
+      await postJSON<{ ok: boolean }>(`/api/v1/task-runs/${runId}/cancel`);
+      taskRuns = taskRuns.map((run) => (run.id === runId ? { ...run, state: 'cancelled', completed_at: new Date().toISOString() } : run));
+      notifyInfo('Task run cancelled.');
+    } catch (error) {
+      notifyError(messageFromError(error), () => cancelTaskRun(runId));
+    }
   }
 
   async function retryTaskRun(runId: string): Promise<void> {
-    const response = await postJSON<TaskRunResponse>(`/api/v1/task-runs/${runId}/retry`);
-    taskRuns = [response.run, ...taskRuns];
-    notice = 'Task retry queued.';
+    setActionState(`task-run:${runId}:retry`, 'queued');
+    try {
+      const response = await postJSON<TaskRunResponse>(`/api/v1/task-runs/${runId}/retry`);
+      taskRuns = [response.run, ...taskRuns];
+      notifyInfo('Task retry queued.');
+      void pollTaskRun(response.run.id, `task-run:${runId}:retry`);
+    } catch (error) {
+      setActionState(`task-run:${runId}:retry`, 'failed');
+      notifyError(messageFromError(error), () => retryTaskRun(runId));
+    }
+  }
+
+  async function pollTaskRun(runId: string, stateKey: string): Promise<void> {
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      try {
+        const response = await getJSON<TaskRunRecordResponse>(`/api/v1/task-runs/${runId}`);
+        taskRuns = taskRuns.map((run) => (run.id === runId ? response.run : run));
+        setActionState(stateKey, response.run.state);
+        if (!['queued', 'claimed', 'running', 'waiting'].includes(response.run.state)) {
+          clearActionState(stateKey, response.run.state);
+          if (response.run.state === 'succeeded') {
+            notifySuccess('Task completed.');
+          } else if (response.run.state === 'failed' || response.run.state === 'timed_out') {
+            notifyError(response.run.error_message || 'Task failed.', () => retryTaskRun(runId));
+          }
+          return;
+        }
+      } catch (error) {
+        setActionState(stateKey, 'failed');
+        notifyError(messageFromError(error), () => pollTaskRun(runId, stateKey));
+        return;
+      }
+    }
+    notifyInfo('Task is still running.');
   }
 
   async function showTaskRunEvents(runId: string): Promise<void> {
@@ -1485,6 +1818,8 @@
     {submitting}
     {user}
   >
+    <ToastCenter {toasts} onDismiss={dismissToast} />
+
     <div class="workspace-notices">
       {#if notice}
         <Notice tone="success">{notice}</Notice>
@@ -1530,6 +1865,7 @@
       bind:selectedProviderId
       bind:selectedReplyPresetId
       bind:selectedReplySourceId
+      {streamState}
       {submitting}
       {toolCards}
     />
@@ -1551,6 +1887,7 @@
             bind:replyPresetInstruction
             bind:replyPresetName
             {feedbackStats}
+            {actionStates}
             onCreateReplyPreset={createReplyPreset}
             onRefreshDiagnostics={refreshDiagnostics}
             onRefreshFeedbackStats={refreshFeedbackStats}
@@ -1592,6 +1929,7 @@
           />
         {:else if activeView === strings.nav.agents}
           <AgentsView
+            {actionStates}
             bind:agentActive
             bind:agentAvatar
             bind:agentDefaultModel
@@ -1619,6 +1957,7 @@
           />
         {:else if activeView === strings.nav.memories}
           <MemoriesView
+            {actionStates}
             bind:memoryActive
             bind:memoryContent
             bind:memoryImportance
@@ -1638,6 +1977,7 @@
           />
         {:else if activeView === strings.nav.tasks}
           <TasksView
+            {actionStates}
             {agents}
             bind:taskAgentId
             bind:taskConcurrencyPolicy
@@ -1677,6 +2017,8 @@
           />
         {:else if activeView === strings.nav.mcp}
           <MCPView
+            {actionStates}
+            {pendingToolApprovals}
             bind:mcpArguments
             bind:mcpAuthorization
             bind:mcpCommand
