@@ -4,6 +4,8 @@ const owner = {
   email: 'owner@example.com',
   password: 'very-secure-e2e-password'
 };
+const providerURL = process.env.E2E_PROVIDER_URL ?? `http://127.0.0.1:${process.env.E2E_PROVIDER_PORT ?? '17011'}`;
+const mcpURL = process.env.E2E_MCP_URL ?? `http://127.0.0.1:${process.env.E2E_MCP_PORT ?? '17012'}/mcp`;
 
 test.beforeEach(async ({ page }) => {
   const errors: string[] = [];
@@ -119,7 +121,7 @@ async function createProvider(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Add Provider' }).click();
   await page.getByLabel('Provider name').fill('Mock Provider');
-  await page.getByLabel('Base URL').fill('http://127.0.0.1:17011');
+  await page.getByLabel('Base URL').fill(providerURL);
   await page.getByLabel('API key').fill('mock-key');
   await page.getByLabel('Default model').fill('e2e-model');
   await page.getByLabel('Fallback model').fill('e2e-fallback');
@@ -158,7 +160,7 @@ async function createMCPServerAndDiscoverTool(page: Page): Promise<{ serverId: s
   await page.getByRole('button', { name: 'New MCP server' }).click();
   await page.getByLabel('Name', { exact: true }).fill('Mock MCP');
   await page.getByLabel('Description').fill('Mock MCP server.');
-  await page.getByLabel('HTTP URL').fill('http://127.0.0.1:17012/mcp');
+  await page.getByLabel('HTTP URL').fill(mcpURL);
   await page.getByRole('button', { name: 'Add MCP server' }).click();
   await expect(page.getByRole('dialog', { name: 'Tools' }).getByText('Mock MCP', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'MCP server menu for Mock MCP' }).click();
