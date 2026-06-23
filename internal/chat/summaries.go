@@ -12,6 +12,8 @@ import (
 
 const summaryBatchSize = 10
 
+const notEnoughSummaryHistoryMessage = "Not enough conversation history to summarize. Add more messages or lower the recent-message window before regenerating."
+
 func (s *Service) QueueSummary(ctx context.Context, principal PrincipalContext, conversationID string) (Conversation, bool, error) {
 	conversation, queued, err := s.repo.MarkSummaryQueued(ctx, principal.WorkspaceID, principal.UserID, conversationID)
 	if err != nil || !queued {
@@ -127,6 +129,7 @@ func (s *Service) summarizeConversation(ctx context.Context, conversation Conver
 		return s.repo.SaveConversationSummary(ctx, conversation.ID, SummaryUpdate{
 			Summary:              conversation.Summary,
 			Status:               "idle",
+			Error:                notEnoughSummaryHistoryMessage,
 			GeneratedAt:          &now,
 			IncrementVersion:     false,
 			EstimatedInputTokens: 0,

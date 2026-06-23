@@ -214,7 +214,7 @@ func (s *Service) Run(ctx context.Context, principal PrincipalContext, conversat
 			return err
 		}
 	}
-	promptMessages, err := s.contextMessages(ctx, principal, conversation, agent, memories, userMessage.ID, assistantMessage.ID, "")
+	promptMessages, err := s.contextMessages(ctx, principal, conversation, agent, memories, userMessage.ID, assistantMessage.ID, "", "")
 	if err != nil {
 		return err
 	}
@@ -374,7 +374,7 @@ func (s *Service) ResumeRun(ctx context.Context, principal PrincipalContext, run
 			return err
 		}
 	}
-	promptMessages, err := s.contextMessages(ctx, principal, conversation, agent, memories, run.UserMessageID, "", run.BranchID)
+	promptMessages, err := s.contextMessages(ctx, principal, conversation, agent, memories, run.UserMessageID, "", run.BranchID, "")
 	if err != nil {
 		return err
 	}
@@ -439,9 +439,6 @@ func (s *Service) Regenerate(ctx context.Context, principal PrincipalContext, as
 		return err
 	}
 	input.Content = userMessage.Content
-	if instruction := strings.TrimSpace(input.RegenerationInstruction); instruction != "" {
-		input.Content += "\n\nRegeneration instruction:\n" + instruction
-	}
 	return s.runOnBranch(ctx, principal, run.ConversationID, branch, input, sink)
 }
 
@@ -547,7 +544,7 @@ func (s *Service) runOnBranch(ctx context.Context, principal PrincipalContext, c
 			return err
 		}
 	}
-	promptMessages, err := s.contextMessages(ctx, principal, conversation, agent, memories, userMessage.ID, assistantMessage.ID, branch.ID)
+	promptMessages, err := s.contextMessages(ctx, principal, conversation, agent, memories, userMessage.ID, assistantMessage.ID, branch.ID, input.RegenerationInstruction)
 	if err != nil {
 		return err
 	}
@@ -956,6 +953,7 @@ func (s *Service) contextMessages(
 	currentUserMessageID string,
 	assistantPlaceholderID string,
 	branchID string,
+	internalInstruction string,
 ) ([]providers.ChatMessage, error) {
 	messages, err := s.repo.ListMessages(ctx, principal.WorkspaceID, principal.UserID, conversation.ID)
 	if err != nil {
@@ -969,6 +967,7 @@ func (s *Service) contextMessages(
 		CurrentUserMessageID:   currentUserMessageID,
 		AssistantPlaceholderID: assistantPlaceholderID,
 		BranchID:               branchID,
+		InternalInstruction:    internalInstruction,
 		RecentMessageLimit:     s.cfg.Chat.RecentMessageLimit,
 		ContextThreshold:       s.cfg.Chat.ContextThreshold,
 	})

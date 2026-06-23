@@ -16,6 +16,7 @@ type ContextRequest struct {
 	CurrentUserMessageID   string
 	AssistantPlaceholderID string
 	BranchID               string
+	InternalInstruction    string
 	RecentMessageLimit     int
 	ContextThreshold       int
 }
@@ -27,7 +28,7 @@ type ContextBuildResult struct {
 }
 
 func BuildPromptMessages(request ContextRequest) ContextBuildResult {
-	systemMessages := buildSystemMessages(request.Conversation, request.Agent, request.Memories)
+	systemMessages := buildSystemMessages(request.Conversation, request.Agent, request.Memories, request.InternalInstruction)
 	history := branchAwareHistory(request)
 	trimmed := 0
 	if request.RecentMessageLimit > 0 && len(history) > request.RecentMessageLimit {
@@ -57,7 +58,7 @@ func joinPromptMessages(systemMessages []providers.ChatMessage, history []provid
 	return result
 }
 
-func buildSystemMessages(conversation Conversation, agent AgentContext, memories []MemorySnippet) []providers.ChatMessage {
+func buildSystemMessages(conversation Conversation, agent AgentContext, memories []MemorySnippet, internalInstruction string) []providers.ChatMessage {
 	messages := make([]providers.ChatMessage, 0, 4)
 	if strings.TrimSpace(agent.SystemPrompt) != "" {
 		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: strings.TrimSpace(agent.SystemPrompt)})
@@ -80,6 +81,9 @@ func buildSystemMessages(conversation Conversation, agent AgentContext, memories
 			builder.WriteString("\n")
 		}
 		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: strings.TrimSpace(builder.String())})
+	}
+	if instruction := strings.TrimSpace(internalInstruction); instruction != "" {
+		messages = append(messages, providers.ChatMessage{Role: RoleSystem, Content: "Internal instruction for this generation only:\n" + instruction})
 	}
 	return messages
 }

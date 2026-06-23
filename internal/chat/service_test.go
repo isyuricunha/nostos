@@ -234,6 +234,89 @@ func TestBranchContextExcludesSiblingMessagesInProviderRequest(t *testing.T) {
 	}
 }
 
+func TestRegenerateKeepsInstructionOutOfVisibleUserMessage(t *testing.T) {
+	ctx := context.Background()
+	var recorder requestRecorder
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		recorder.record(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeStreamContent(w, "Regenerated answer.")
+	}))
+	defer server.Close()
+
+	cfg, store, user, cleanup := newChatTestContext(t)
+	defer cleanup()
+	authRepo := auth.NewSQLRepository(store)
+	providerClient := providers.NewOpenAIClient()
+	providerService := providers.NewService(cfg, providers.NewSQLRepository(store), authRepo, providerClient)
+	apiKey := "test-api-key"
+	provider, err := providerService.Create(ctx, providers.PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, providers.ProviderInput{
+		Name:             "Mock",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "mock-model",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	service := NewService(cfg, NewSQLRepository(store), providerService, providerClient, fakeAgentResolver{}, &fakeMemoryProvider{})
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	conversation, err := service.CreateConversation(ctx, principal, Conversation{Title: "Regeneration chat", ProviderID: provider.ID, Model: "mock-model"})
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	if err := service.Run(ctx, principal, conversation.ID, RunInput{Content: "Explain leases"}, noopSink); err != nil {
+		t.Fatalf("initial run: %v", err)
+	}
+	messages, err := service.ListMessages(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	assistantID := messages[1].ID
+	instruction := "Regenerate the response with a clearer and more useful answer."
+	if err := service.Regenerate(ctx, principal, assistantID, RunInput{RegenerationInstruction: instruction}, noopSink); err != nil {
+		t.Fatalf("regenerate: %v", err)
+	}
+	stored, err := service.ListMessages(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("list regenerated messages: %v", err)
+	}
+	var branchUser Message
+	for _, message := range stored {
+		if message.BranchID != "" && message.Role == RoleUser {
+			branchUser = message
+			break
+		}
+	}
+	if branchUser.ID == "" {
+		t.Fatalf("expected regenerated branch user message: %#v", stored)
+	}
+	if branchUser.Content != "Explain leases" {
+		t.Fatalf("regeneration instruction leaked into visible user message: %#v", branchUser)
+	}
+	requests := recorder.requests()
+	if len(requests) != 2 {
+		t.Fatalf("expected two provider requests, got %d", len(requests))
+	}
+	regenerationRequest := requests[1]
+	if !containsContentSubstring(regenerationRequest, "Internal instruction for this generation only:\n"+instruction) {
+		t.Fatalf("regeneration instruction was not sent internally: %#v", regenerationRequest)
+	}
+	if countContent(regenerationRequest, "Explain leases") != 1 {
+		t.Fatalf("original user message should be sent exactly once: %#v", regenerationRequest)
+	}
+	for _, message := range regenerationRequest {
+		if message.Role == RoleUser && strings.Contains(message.Content, "Regenerate the response") {
+			t.Fatalf("internal regeneration instruction was sent as user content: %#v", regenerationRequest)
+		}
+	}
+}
+
 func TestBuildPromptMessagesPreservesToolCallsAndResults(t *testing.T) {
 	now := time.Now().UTC()
 	result := BuildPromptMessages(ContextRequest{
@@ -367,6 +450,35 @@ func TestConversationSummaryQueueWorkerAndInjection(t *testing.T) {
 	}
 	if !queued {
 		t.Fatal("expected manual regenerate to queue a new summary")
+	}
+}
+
+func TestConversationSummaryTooShortStoresClearResult(t *testing.T) {
+	ctx := context.Background()
+	cfg, store, user, cleanup := newChatTestContext(t)
+	defer cleanup()
+	service := NewService(cfg, NewSQLRepository(store), nil, providers.NewOpenAIClient(), fakeAgentResolver{}, &fakeMemoryProvider{})
+	principal := PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}
+	conversation, err := service.CreateConversation(ctx, principal, Conversation{Title: "Short chat"})
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	_, queued, err := service.QueueSummary(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("queue summary: %v", err)
+	}
+	if !queued {
+		t.Fatal("expected summary to be queued")
+	}
+	if _, err := service.UpdateConversationSummaries(ctx, 10); err != nil {
+		t.Fatalf("execute summary update: %v", err)
+	}
+	updated, err := service.GetConversation(ctx, principal, conversation.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if updated.SummaryStatus != "idle" || updated.SummaryError != notEnoughSummaryHistoryMessage {
+		t.Fatalf("short summary result should be clear and non-failed: %#v", updated)
 	}
 }
 
