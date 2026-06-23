@@ -237,6 +237,24 @@ The required screenshots were captured and manually inspected at `1600x900`, `13
 
 Inspection notes: the old dashboard page structure is absent, chat remains visible behind windows, sidebar density is within the target range, composer controls fit without overlap, settings/provider/model-default flows are windowed, module windows are compact, and the mobile layout avoids horizontal scrolling.
 
+## Final Validation
+
+- `test -z "$(gofmt -l cmd internal)"`
+- `go mod tidy`
+- `git diff --exit-code -- go.mod go.sum`
+- `go vet ./...`
+- `go test ./...`
+- `go test -race ./...`
+- `go test -tags=integration ./...`
+- `pnpm --dir web lint`
+- `pnpm --dir web check`
+- `pnpm --dir web test`
+- `pnpm --dir web build`
+- `E2E_APP_PORT=17200 E2E_PROVIDER_PORT=17211 E2E_MCP_PORT=17212 E2E_READY_PORT=17299 pnpm --dir web test:e2e`
+- `docker build -t nostos:odysseus-ui-parity .`
+- SQLite compose deployment: `nostos-ui-sqlite`, `/health/ready` true, `database.driver=sqlite`, `migration.applied=7`, `migration.total=7`, app and worker healthy.
+- PostgreSQL compose deployment: `nostos-ui-postgres`, `/health/ready` true, `database.driver=postgres`, `migration.applied=7`, `migration.total=7`, app, worker, and PostgreSQL healthy.
+
 ## Milestone Checklist
 
 - [x] Audit Nostos current frontend and Odysseus reference.
@@ -251,5 +269,5 @@ Inspection notes: the old dashboard page structure is absent, chat remains visib
 - [x] Add responsive sidebar/drawer/window behavior.
 - [x] Add focused component and e2e coverage.
 - [x] Capture and inspect required screenshots.
-- [ ] Run required Go, pnpm, Docker, PostgreSQL, and SQLite validation.
+- [x] Run required Go, pnpm, Docker, PostgreSQL, and SQLite validation.
 - [ ] Commit milestone-sized changes and push `feat/odysseus-ui-parity`.
