@@ -40,6 +40,7 @@ APP_ENCRYPTION_KEY=...
 APP_SESSION_SECRET=...
 APP_BASE_URL=https://nostos.example.com
 SECURE_COOKIES=true
+MODEL_REFRESH_TIMEOUT=60s
 ```
 
 Start:
@@ -49,6 +50,8 @@ docker compose up -d --build
 ```
 
 The app container applies migrations during startup. The worker waits for the app health check and verifies that migrations are current before processing jobs.
+
+For Bifrost or other large provider catalogs, keep `MODEL_REFRESH_TIMEOUT` at `60s` or raise it up to `300s`. A failed model refresh does not erase the previous cached catalog.
 
 ## Local PostgreSQL Evaluation
 

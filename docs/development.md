@@ -24,3 +24,5 @@ make doctor
 ```
 
 The Vite dev server proxies `/api` and `/health` to `localhost:7000`.
+
+Model catalog refreshes use `MODEL_REFRESH_TIMEOUT`, which defaults to `60s`. Keep this high enough when developing against a Bifrost or OpenAI-compatible proxy that returns hundreds of models.

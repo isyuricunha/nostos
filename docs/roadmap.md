@@ -15,3 +15,7 @@ Planned email module:
 - Contact-aware context
 
 The Version 0.1 modules keep email out of core chat, tasks, agents, memories, and reply-intent logic.
+
+## Current Next Step
+
+Nostos is moving toward a chat-first workspace with a provider-scoped model platform, global Chat/Utility/Vision model roles, and a reusable searchable model picker for large OpenAI-compatible catalogs.

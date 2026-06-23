@@ -14,4 +14,8 @@ Persistence is PostgreSQL-first with SQLite support behind repository interfaces
 
 External model providers use an OpenAI-compatible client. MCP support is isolated in `internal/mcp` so future tool and transport changes do not leak into chat, agents, or tasks.
 
+Model selection is a provider-scoped platform concern. `internal/providers` owns the cached model catalog, asynchronous refresh state, and global role bindings. Chat, summaries, replies, and tasks resolve empty defaults through the provider service instead of duplicating model-fallback rules.
+
+The frontend information architecture is chat-first: conversations live in the primary shell, while Agents, Memories, Tasks, MCP, Providers, and Settings support chat as secondary workspaces.
+
 Email is planned for Version 0.2 and can be added as a new module without rewriting chat, tasks, agents, reply intents, or authentication.

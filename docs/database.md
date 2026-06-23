@@ -11,6 +11,7 @@ Important table groups:
 
 - Identity: `users`, `sessions`, `audit_logs`, `workspaces`
 - Providers: `providers`, `provider_models`
+- Model defaults: `model_role_bindings`
 - Agents: `agents`, `agent_mcp_servers`, `agent_tool_permissions`
 - Chat: `conversations`, `messages`, `message_branches`, `chat_runs`, `chat_run_memories`
 - Memories: `memories`
@@ -20,3 +21,9 @@ Important table groups:
 - Settings: `settings`
 
 Identifiers are application-generated text IDs. Timestamps are stored in UTC. PostgreSQL uses JSONB where useful; SQLite stores JSON as text.
+
+## Model Catalog
+
+`provider_models` is a persistent provider-scoped cache. It stores exact full provider model IDs, availability, manual/API source, capability metadata, and safe probe or refresh errors. Missing models from a refresh are marked unavailable rather than deleted.
+
+`model_role_bindings` stores ordered global role defaults for `chat`, `utility`, and `vision`. Each binding references a provider and full model ID so identical model IDs returned by different providers remain distinct.
