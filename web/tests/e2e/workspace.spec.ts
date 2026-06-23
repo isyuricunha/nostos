@@ -122,8 +122,7 @@ async function createAgent(page: Page): Promise<string> {
   await page.getByLabel('Name', { exact: true }).fill('E2E Agent');
   await page.getByLabel('Description').fill('Agent used by browser E2E.');
   await page.getByLabel('System prompt').fill('Use the selected memories and approved tools.');
-  await page.getByLabel('Default provider').selectOption({ label: 'Mock Provider' });
-  await page.getByLabel('Default model').fill('e2e-model');
+  await selectModel(page, 'Agent default model', 'e2e-model');
   await page.getByLabel('Default tool permission').selectOption('ask');
   await page.getByRole('button', { name: 'Add agent' }).click();
   await expect(page.getByText('E2E Agent')).toBeVisible();
@@ -186,6 +185,12 @@ async function createAndRunTask(page: Page): Promise<void> {
 async function sendChat(page: Page, content: string): Promise<void> {
   await page.getByPlaceholder('Send a message...').fill(content);
   await page.getByRole('button', { name: 'Send' }).click();
+}
+
+async function selectModel(page: Page, label: string, modelId: string): Promise<void> {
+  await page.getByRole('button', { name: new RegExp(label, 'i') }).click();
+  await page.getByPlaceholder('Search provider, model, capability').fill(modelId);
+  await page.getByRole('option', { name: new RegExp(modelId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) }).first().click();
 }
 
 async function openFirstMessageActions(page: Page, actionName: string): Promise<void> {

@@ -206,6 +206,59 @@ func TestModelRolesResolveProviderScopedFallbacks(t *testing.T) {
 	}
 }
 
+func TestModelRolesResolveOrderedFallbackChain(t *testing.T) {
+	ctx := context.Background()
+	cfg, store, user, cleanup := newProviderTestContext(t)
+	defer cleanup()
+	service := NewService(cfg, NewSQLRepository(store), auth.NewSQLRepository(store), NewOpenAIClient())
+	apiKey := "test-api-key"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "utility-fast"}}})
+	}))
+	defer server.Close()
+	disabled, err := service.Create(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, ProviderInput{
+		Name:             "Disabled provider",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          false,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "disabled-model",
+	})
+	if err != nil {
+		t.Fatalf("create disabled provider: %v", err)
+	}
+	enabled, err := service.Create(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, ProviderInput{
+		Name:             "Enabled provider",
+		BaseURL:          server.URL,
+		APIKey:           &apiKey,
+		Enabled:          true,
+		RequestTimeoutMS: 5000,
+		DefaultModel:     "utility-fast",
+	})
+	if err != nil {
+		t.Fatalf("create enabled provider: %v", err)
+	}
+	roles, err := service.SetModelRole(ctx, PrincipalContext{WorkspaceID: user.WorkspaceID, UserID: user.ID}, ModelRoleUtility, ModelRoleInput{
+		Models: []ModelRoleReference{
+			{ProviderID: disabled.ID, ModelID: "disabled-model"},
+			{ProviderID: enabled.ID, ModelID: "utility-fast"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("set utility chain: %v", err)
+	}
+	if len(roles) != 2 || roles[0].Position != 0 || roles[1].Position != 1 {
+		t.Fatalf("roles were not stored in order: %#v", roles)
+	}
+	resolution, err := service.ResolveModelRole(ctx, user.WorkspaceID, ModelRoleUtility)
+	if err != nil {
+		t.Fatalf("resolve utility role: %v", err)
+	}
+	if resolution.Provider.ID != enabled.ID || resolution.ModelID != "utility-fast" {
+		t.Fatalf("expected enabled fallback provider, got %#v", resolution)
+	}
+}
+
 func newProviderTestContext(t *testing.T) (config.Config, *database.Store, auth.User, func()) {
 	t.Helper()
 	ctx := context.Background()

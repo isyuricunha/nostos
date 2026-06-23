@@ -90,4 +90,21 @@ describe('ModelPicker', () => {
 
     expect(screen.getByRole('button', { name: new RegExp('Bifrost/custom/manual-model') })).toBeTruthy();
   });
+
+  it('can be scoped to one provider for provider-specific defaults', async () => {
+    render(ModelPicker, {
+      label: 'Provider default model',
+      providers,
+      models,
+      selectedProviderId: 'provider_bifrost',
+      fixedProviderId: 'provider_bifrost',
+      role: 'chat'
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: /provider default model/i }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Provider default model picker' });
+    expect(within(dialog).getByText('Bifrost')).toBeTruthy();
+    expect(within(dialog).queryByText('Direct NVIDIA')).toBeNull();
+  });
 });
