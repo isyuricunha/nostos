@@ -29,9 +29,9 @@ import (
 )
 
 var (
-	version        = "0.1.0-dev"
-	buildCommit    = "unknown"
-	buildTimestamp = "unknown"
+	version        = "0.1.0"
+	buildCommit    = "development"
+	buildTimestamp = "development"
 )
 
 func main() {
@@ -74,8 +74,18 @@ func run(args []string) error {
 		return runDoctor(ctx, cfg, store)
 	}
 
-	if err := database.RunMigrations(ctx, store, cfg.MigrationsDir); err != nil {
-		return err
+	if command == "worker" {
+		status, err := database.CheckMigrations(ctx, store, cfg.MigrationsDir)
+		if err != nil {
+			return err
+		}
+		if !status.Current {
+			return fmt.Errorf("database migrations are not current; pending migrations: %v", status.Pending)
+		}
+	} else {
+		if err := database.RunMigrations(ctx, store, cfg.MigrationsDir); err != nil {
+			return err
+		}
 	}
 	authRepo := auth.NewSQLRepository(store)
 	authService := auth.NewService(authRepo, cfg)
@@ -139,7 +149,7 @@ func runServer(
 	feedbackService *feedback.Service,
 	replyService *replies.Service,
 ) error {
-	healthService := health.NewService(store, version, buildCommit, buildTimestamp)
+	healthService := health.NewService(store, version, buildCommit, buildTimestamp, cfg.MigrationsDir)
 	handler := api.NewRouter(api.RouterDeps{
 		Config: cfg,
 		Logger: logger,

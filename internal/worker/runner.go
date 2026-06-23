@@ -9,6 +9,7 @@ import (
 
 	"github.com/isyuricunha/nostos/internal/config"
 	"github.com/isyuricunha/nostos/internal/database"
+	"github.com/isyuricunha/nostos/internal/health"
 	"github.com/isyuricunha/nostos/internal/id"
 	"github.com/isyuricunha/nostos/internal/tasks"
 )
@@ -83,12 +84,14 @@ func (r *Runner) pollCoordinator(ctx context.Context) {
 	if err := r.tasks.EnqueueDueSchedules(ctx); err != nil && r.logger != nil {
 		r.logger.Error("failed to enqueue due task schedules", "error", err)
 	}
+	_ = health.RecordHeartbeat(ctx, r.store, "scheduler", "", "healthy", "")
 }
 
 func (r *Runner) workerLoop(ctx context.Context, workerID string, slot int) {
 	ticker := time.NewTicker(r.cfg.Worker.PollInterval)
 	defer ticker.Stop()
 	for {
+		_ = health.RecordHeartbeat(ctx, r.store, "worker", workerID, "healthy", "")
 		if r.tasks != nil {
 			if err := r.tasks.ClaimAndExecute(ctx, workerID); err != nil && r.logger != nil {
 				r.logger.Error("failed to execute claimed task", "error", err, "worker_slot", slot)
