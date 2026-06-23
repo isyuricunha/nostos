@@ -46,3 +46,5 @@ Message details are available on demand. The first implementation shows recorded
 ## Supporting Screens
 
 Agents, Memories, Tasks, MCP, Providers, and Settings remain available as supporting workspaces. Creation and editing forms remain functional, but the product navigation now makes conversation work the default path.
+
+Agents, Memories, Tasks, MCP servers, and Providers present their lists as the primary surface. Create and edit workflows open in focused modal panels instead of occupying permanent split-screen form columns.

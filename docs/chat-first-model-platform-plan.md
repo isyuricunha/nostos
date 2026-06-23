@@ -13,13 +13,14 @@ The branch `feat/chat-first-model-platform` is not documentation-only. It alread
 
 The current audit confirms that the branch has backend model-catalog migrations, model role APIs, a first version of the chat-first shell, a reusable `ModelPicker`, and E2E coverage for an 800-model mock catalog.
 
-Remaining gaps found during this audit:
+Gaps found and addressed during this milestone:
 
 - Settings exposes only the primary model for each role; ordered fallback chains are persisted in the backend but not fully editable in the UI.
 - Agents, Tasks, and Providers still contain raw model text fields in several places instead of the reusable model picker.
 - The frontend catalog request loads only 500 models, which is below the 800-1,000 model target.
 - E2E coverage still depends on raw model inputs in the agent flow.
 - Provider creation must still allow manual model IDs before the provider exists in the catalog, but provider editing should use the model picker once cached models are available.
+- Supporting screens used permanent split-form layouts; create/edit flows now open in explicit modals so lists remain the primary workspace surface.
 
 ## Current Architecture
 
