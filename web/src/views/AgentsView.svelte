@@ -1,7 +1,5 @@
 <script lang="ts">
-  import EmptyState from '../components/common/EmptyState.svelte';
-  import Modal from '../components/common/Modal.svelte';
-  import StatusPill from '../components/common/StatusPill.svelte';
+  import Icon from '../components/common/Icon.svelte';
   import ModelPicker from '../components/models/ModelPicker.svelte';
   import type { Agent, Provider, ProviderModel } from '../lib/types';
   import { strings } from '../strings';
@@ -28,12 +26,25 @@
   export let onEdit: (agent: Agent) => void;
   export let onDuplicate: (agentId: string) => void | Promise<void>;
   export let onDelete: (agentId: string) => void | Promise<void>;
+  export let onToggleActive: (agent: Agent) => void | Promise<void>;
+  export let onTest: (agent: Agent) => void;
 
+  let query = '';
+  let stateFilter: 'all' | 'active' | 'disabled' = 'all';
   let formOpen = false;
+  let openMenuId = '';
 
   $: if (editingAgentId) {
     formOpen = true;
   }
+  $: filteredAgents = agents.filter((agent) => {
+    const matchesState =
+      stateFilter === 'all' ||
+      (stateFilter === 'active' && agent.active) ||
+      (stateFilter === 'disabled' && !agent.active);
+    const haystack = `${agent.name} ${agent.description} ${agent.default_model ?? ''} ${agent.memory_access_mode}`.toLowerCase();
+    return matchesState && haystack.includes(query.trim().toLowerCase());
+  });
 
   function openCreate(): void {
     onCancelEdit();
@@ -45,137 +56,168 @@
     formOpen = false;
   }
 
+  function startEdit(agent: Agent): void {
+    onEdit(agent);
+    formOpen = true;
+    openMenuId = '';
+  }
+
   async function submitForm(): Promise<void> {
     await onSubmit();
     formOpen = false;
   }
 </script>
 
-<section class="panel">
-  <div class="panel-heading">
-    <div>
-      <p class="eyebrow">Assistants</p>
-      <h2>Agents</h2>
-    </div>
-    <div class="cluster">
-      <button on:click={onRefresh} type="button">Refresh</button>
-      <button on:click={openCreate} type="button">New agent</button>
-    </div>
-  </div>
+<div class:editor-open={formOpen} class="workspace-module-grid">
+  <section class="window-list-pane" aria-label="Agents">
+    <header class="window-panel-toolbar">
+      <div>
+        <strong>Agents</strong>
+        <span>{agents.length} profiles</span>
+      </div>
+      <div class="window-toolbar-actions">
+        <button aria-label="Refresh agents" on:click={onRefresh} type="button">
+          <Icon name="refresh" size={13} />
+        </button>
+        <button on:click={openCreate} type="button">
+          <Icon name="plus" size={13} /> New agent
+        </button>
+      </div>
+    </header>
 
-  <Modal open={formOpen} title={editingAgentId ? 'Edit agent' : strings.agents.add} onClose={closeForm}>
-  <form class="form-grid" on:submit|preventDefault={submitForm}>
-    <div class="form-section">
-      <h3>Basic identity</h3>
-      <label>
-        Name
-        <input bind:value={agentName} required />
+    <div class="window-filter-row">
+      <label class="window-search">
+        <Icon name="search" size={13} />
+        <input bind:value={query} placeholder="Search agents" />
       </label>
-      <label>
-        Description
-        <input bind:value={agentDescription} />
-      </label>
-      <label>
-        Avatar or icon
-        <input bind:value={agentAvatar} />
-      </label>
-      <label>
-        System prompt
-        <textarea bind:value={agentPrompt} required></textarea>
-      </label>
-      <label class="inline-check">
-        <input bind:checked={agentActive} type="checkbox" />
-        Active
-      </label>
+      <select aria-label="Agent state" bind:value={stateFilter}>
+        <option value="all">All</option>
+        <option value="active">Active</option>
+        <option value="disabled">Disabled</option>
+      </select>
     </div>
 
-    <div class="form-section">
-      <h3>Provider and model</h3>
-      <ModelPicker
-        bind:selectedModelId={agentDefaultModel}
-        bind:selectedProviderId={agentDefaultProviderId}
-        label="Agent default model"
-        models={providerModels}
-        {providers}
-        role="chat"
-      />
-      <ModelPicker
-        bind:selectedModelId={agentFallbackModel}
-        bind:selectedProviderId={agentDefaultProviderId}
-        fixedProviderId={agentDefaultProviderId}
-        label="Agent fallback model"
-        models={providerModels}
-        {providers}
-        role="chat"
-      />
-    </div>
-
-    <div class="form-section">
-      <h3>Memory and tools</h3>
-      <label>
-        Memory mode
-        <select bind:value={agentMemoryMode}>
-          <option value="none">none</option>
-          <option value="pinned_only">pinned_only</option>
-          <option value="relevant">relevant</option>
-          <option value="all">all</option>
-        </select>
-      </label>
-      <label>
-        Default tool permission
-        <select bind:value={agentToolPermissionDefault}>
-          <option value="deny">deny</option>
-          <option value="ask">ask</option>
-          <option value="allow">allow</option>
-        </select>
-      </label>
-    </div>
-
-    <div class="form-section">
-      <h3>Runtime parameters</h3>
-      <label>
-        Temperature
-        <input bind:value={agentTemperature} min="0" max="2" step="0.1" type="number" />
-      </label>
-      <label>
-        Maximum tool iterations
-        <input bind:value={agentMaxToolIterations} min="1" max="32" type="number" />
-      </label>
-    </div>
-
-    <button type="submit">{editingAgentId ? 'Save agent' : strings.agents.add}</button>
-  </form>
-  </Modal>
-
-  {#if agents.length === 0}
-    <EmptyState description="Create a focused assistant profile for chat and scheduled work." title={strings.agents.noAgents} />
-  {:else}
-    <div class="table-list agent-cards">
-      {#each agents as agent (agent.id)}
-        <article>
-          <div>
-            <div class="split">
+    {#if filteredAgents.length === 0}
+      <p class="window-empty">{strings.agents.noAgents}</p>
+    {:else}
+      <div class="dense-row-list">
+        {#each filteredAgents as agent (agent.id)}
+          <article class="agent-row">
+            <span class="row-icon"><Icon name="agent" size={15} /></span>
+            <span class={`status-dot ${agent.active ? 'healthy' : 'disabled'}`}></span>
+            <div>
               <strong>{agent.name}</strong>
-              <StatusPill status={agent.active ? 'active' : 'disabled'} tone={agent.active ? 'success' : 'neutral'} />
+              <span>{agent.description || 'No description'}</span>
+              <small>
+                {agent.default_model || 'workspace default'} · memory {agent.memory_access_mode} · tools {agent.tool_permission_default}
+              </small>
             </div>
-            <span>{agent.description || 'No description'}</span>
-            <span>{agent.memory_access_mode} memory / tools {agent.tool_permission_default}</span>
-            <span>max iterations {agent.max_tool_iterations} / temperature {agent.temperature}</span>
-            {#if agent.default_provider_id || agent.default_model || agent.fallback_model}
-              <span>
-                {agent.default_provider_id ? 'provider configured' : ''}
-                {agent.default_model ? ` / default ${agent.default_model}` : ''}
-                {agent.fallback_model ? ` / fallback ${agent.fallback_model}` : ''}
-              </span>
-            {/if}
-          </div>
-          <div>
-            <button on:click={() => onEdit(agent)} type="button">Edit</button>
-            <button on:click={() => onDuplicate(agent.id)} type="button">{strings.agents.duplicate}</button>
-            <button on:click={() => onDelete(agent.id)} type="button">Delete</button>
-          </div>
-        </article>
-      {/each}
-    </div>
+            <div class="row-actions compact">
+              <button aria-label={`Agent menu for ${agent.name}`} on:click={() => (openMenuId = openMenuId === agent.id ? '' : agent.id)} type="button">
+                <Icon name="kebab" size={14} />
+              </button>
+              {#if openMenuId === agent.id}
+                <div class="row-menu row-menu-right" role="menu">
+                  <button on:click={() => startEdit(agent)} type="button"><Icon name="edit" size={13} /> Edit</button>
+                  <button on:click={() => { openMenuId = ''; onDuplicate(agent.id); }} type="button">
+                    <Icon name="copy" size={13} /> Duplicate
+                  </button>
+                  <button on:click={() => { openMenuId = ''; onToggleActive(agent); }} type="button">
+                    <Icon name={agent.active ? 'minus' : 'check'} size={13} /> {agent.active ? 'Disable' : 'Enable'}
+                  </button>
+                  <button on:click={() => { openMenuId = ''; onTest(agent); }} type="button">
+                    <Icon name="chat" size={13} /> Test
+                  </button>
+                  <button class="danger" on:click={() => { openMenuId = ''; onDelete(agent.id); }} type="button">
+                    <Icon name="trash" size={13} /> Delete
+                  </button>
+                </div>
+              {/if}
+            </div>
+          </article>
+        {/each}
+      </div>
+    {/if}
+  </section>
+
+  {#if formOpen}
+    <aside class="window-editor-panel" aria-label={editingAgentId ? 'Edit agent' : 'Create agent'}>
+      <header>
+        <strong>{editingAgentId ? 'Edit agent' : strings.agents.add}</strong>
+        <button aria-label="Close agent editor" on:click={closeForm} type="button"><Icon name="close" size={13} /></button>
+      </header>
+      <form class="compact-editor-form" on:submit|preventDefault={submitForm}>
+        <label>
+          Name
+          <input bind:value={agentName} required />
+        </label>
+        <label>
+          Description
+          <input bind:value={agentDescription} />
+        </label>
+        <label>
+          Icon name
+          <input bind:value={agentAvatar} />
+        </label>
+        <label>
+          System prompt
+          <textarea bind:value={agentPrompt} required></textarea>
+        </label>
+        <label class="toggle-line">
+          <input bind:checked={agentActive} type="checkbox" />
+          Active
+        </label>
+        <ModelPicker
+          bind:selectedModelId={agentDefaultModel}
+          bind:selectedProviderId={agentDefaultProviderId}
+          label="Agent default model"
+          models={providerModels}
+          {providers}
+          role="chat"
+        />
+        <ModelPicker
+          bind:selectedModelId={agentFallbackModel}
+          bind:selectedProviderId={agentDefaultProviderId}
+          fixedProviderId={agentDefaultProviderId}
+          label="Agent fallback model"
+          models={providerModels}
+          {providers}
+          role="chat"
+        />
+        <div class="two-col">
+          <label>
+            Memory mode
+            <select bind:value={agentMemoryMode}>
+              <option value="none">none</option>
+              <option value="pinned_only">pinned_only</option>
+              <option value="relevant">relevant</option>
+              <option value="all">all</option>
+            </select>
+          </label>
+          <label>
+            Tool policy
+            <select bind:value={agentToolPermissionDefault}>
+              <option value="deny">deny</option>
+              <option value="ask">ask</option>
+              <option value="allow">allow</option>
+            </select>
+          </label>
+        </div>
+        <div class="two-col">
+          <label>
+            Temperature
+            <input bind:value={agentTemperature} min="0" max="2" step="0.1" type="number" />
+          </label>
+          <label>
+            Tool iterations
+            <input bind:value={agentMaxToolIterations} min="1" max="32" type="number" />
+          </label>
+        </div>
+        <div class="editor-actions">
+          <button type="submit">{editingAgentId ? 'Save agent' : strings.agents.add}</button>
+          <button on:click={closeForm} type="button">Cancel</button>
+        </div>
+      </form>
+    </aside>
   {/if}
-</section>
+</div>

@@ -5,7 +5,7 @@ export const strings = {
     agents: 'Agents',
     memories: 'Memories',
     tasks: 'Tasks',
-    mcp: 'MCP',
+    mcp: 'Tools',
     providers: 'Providers',
     settings: 'Settings'
   },

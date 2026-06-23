@@ -108,6 +108,7 @@ export type Message = {
   id: string;
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  branch_id?: string;
   provider_id?: string;
   model?: string;
   total_tokens?: number;
@@ -132,6 +133,10 @@ export type Agent = {
 
 export type Memory = {
   id: string;
+  workspace_id?: string;
+  owner_user_id?: string;
+  agent_id?: string;
+  conversation_id?: string;
   title: string;
   content: string;
   tags: string[];
@@ -140,7 +145,11 @@ export type Memory = {
   pinned: boolean;
   active: boolean;
   source: string;
+  source_message_id?: string;
+  last_used_at?: string;
   use_count: number;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type MemorySnippet = {

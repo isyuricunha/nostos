@@ -6,7 +6,12 @@ import svelte from 'eslint-plugin-svelte';
 const browserGlobals = {
   document: 'readonly',
   fetch: 'readonly',
+  localStorage: 'readonly',
+  navigator: 'readonly',
   Response: 'readonly',
+  requestAnimationFrame: 'readonly',
+  setTimeout: 'readonly',
+  URL: 'readonly',
   window: 'readonly',
   confirm: 'readonly'
 };

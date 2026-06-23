@@ -30,9 +30,26 @@ export async function postStream(
   body: unknown,
   onEvent: StreamEventHandler
 ): Promise<void> {
+  return requestStream('POST', path, body, onEvent);
+}
+
+export async function patchStream(
+  path: string,
+  body: unknown,
+  onEvent: StreamEventHandler
+): Promise<void> {
+  return requestStream('PATCH', path, body, onEvent);
+}
+
+async function requestStream(
+  method: 'POST' | 'PATCH',
+  path: string,
+  body: unknown,
+  onEvent: StreamEventHandler
+): Promise<void> {
   const csrfToken = readCookie('nostos_csrf');
   const response = await fetch(path, {
-    method: 'POST',
+    method,
     credentials: 'include',
     headers: {
       Accept: 'text/event-stream',

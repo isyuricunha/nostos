@@ -213,14 +213,14 @@ This is a clean-room implementation plan. The reference was inspected for intera
 
 - [x] Audit Nostos current frontend and Odysseus reference.
 - [x] Record Odysseus reference commit SHA.
-- [ ] Replace shell with persistent chat workspace.
-- [ ] Add internal SVG icon set.
-- [ ] Add workspace window manager.
-- [ ] Rebuild chat messages and composer.
-- [ ] Move settings and providers into settings window.
-- [ ] Rebuild Memories, Agents, Tasks, and Tools windows.
-- [ ] Restyle and harden ModelPicker for large catalogs.
-- [ ] Add responsive sidebar/drawer/window behavior.
+- [x] Replace shell with persistent chat workspace.
+- [x] Add internal SVG icon set.
+- [x] Add workspace window manager.
+- [x] Rebuild chat messages and composer.
+- [x] Move settings and providers into settings window.
+- [x] Rebuild Memories, Agents, Tasks, and Tools windows.
+- [x] Restyle and harden ModelPicker for large catalogs.
+- [x] Add responsive sidebar/drawer/window behavior.
 - [ ] Add focused component and e2e coverage.
 - [ ] Capture and inspect required screenshots.
 - [ ] Run required Go, pnpm, Docker, PostgreSQL, and SQLite validation.

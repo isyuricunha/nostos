@@ -4,15 +4,16 @@
   import { marked } from 'marked';
   import AppShell from '../app/shell/AppShell.svelte';
   import Notice from '../components/common/Notice.svelte';
+  import WorkspaceWindow from '../components/common/WorkspaceWindow.svelte';
+  import type { IconName } from '../components/common/Icon.svelte';
   import AgentsView from './AgentsView.svelte';
   import AuthView from './AuthView.svelte';
   import ChatView from './ChatView.svelte';
   import MCPView from './MCPView.svelte';
   import MemoriesView from './MemoriesView.svelte';
-  import ProvidersView from './ProvidersView.svelte';
   import SettingsView from './SettingsView.svelte';
   import TasksView from './TasksView.svelte';
-  import { deleteJSON, getJSON, postJSON, postStream, putJSON } from '../lib/api';
+  import { deleteJSON, getJSON, patchStream, postJSON, postStream, putJSON } from '../lib/api';
   import { formatHeaderText, parseHeaderText } from '../lib/provider-form';
   import type {
     Agent,
@@ -77,9 +78,7 @@
     strings.nav.agents,
     strings.nav.memories,
     strings.nav.tasks,
-    strings.nav.mcp,
-    strings.nav.providers,
-    strings.nav.settings
+    strings.nav.mcp
   ];
 
   let setupAvailable = false;
@@ -119,6 +118,7 @@
   let composer = '';
   let activeRunId = '';
   let activeView: string = strings.nav.chat;
+  let minimizedView = '';
   let loading = true;
   let submitting = false;
   let notice = '';
@@ -495,6 +495,31 @@
     }
   }
 
+  async function toggleProviderEnabled(provider: Provider): Promise<void> {
+    submitting = true;
+    errorMessage = '';
+    try {
+      const response = await putJSON<ProviderResponse>(`/api/v1/providers/${provider.id}`, {
+        name: provider.name,
+        base_url: provider.base_url,
+        api_key_env_ref: provider.api_key_env_ref ?? '',
+        organization_header: provider.organization_header ?? '',
+        project_header: provider.project_header ?? '',
+        custom_headers: provider.custom_headers ?? {},
+        enabled: !provider.enabled,
+        request_timeout_ms: provider.request_timeout_ms,
+        default_model: provider.default_model ?? '',
+        fallback_model: provider.fallback_model ?? ''
+      });
+      providers = providers.map((item) => (item.id === provider.id ? response.provider : item));
+      notice = response.provider.enabled ? 'Provider enabled.' : 'Provider disabled.';
+    } catch (error) {
+      errorMessage = messageFromError(error);
+    } finally {
+      submitting = false;
+    }
+  }
+
   async function testProvider(providerId: string): Promise<void> {
     submitting = true;
     errorMessage = '';
@@ -592,6 +617,11 @@
       selectedConversationId = '';
       messages = [];
     }
+  }
+
+  async function unarchiveConversation(conversation: Conversation): Promise<void> {
+    const response = await putJSON<ConversationResponse>(`/api/v1/conversations/${conversation.id}`, { archive: false });
+    conversations = conversations.map((item) => (item.id === conversation.id ? response.conversation : item));
   }
 
   async function deleteConversation(conversation: Conversation): Promise<void> {
@@ -834,6 +864,32 @@
     await refreshAgents();
   }
 
+  async function toggleAgentActive(agent: Agent): Promise<void> {
+    const response = await putJSON<AgentResponse>(`/api/v1/agents/${agent.id}`, {
+      name: agent.name,
+      description: agent.description,
+      avatar: agent.avatar,
+      system_prompt: agent.system_prompt,
+      default_provider_id: agent.default_provider_id ?? '',
+      default_model: agent.default_model ?? '',
+      fallback_model: agent.fallback_model ?? '',
+      temperature: agent.temperature,
+      max_tool_iterations: agent.max_tool_iterations,
+      memory_access_mode: agent.memory_access_mode,
+      tool_permission_default: agent.tool_permission_default,
+      active: !agent.active
+    });
+    agents = agents.map((item) => (item.id === agent.id ? response.agent : item));
+    notice = response.agent.active ? 'Agent enabled.' : 'Agent disabled.';
+  }
+
+  function testAgent(agent: Agent): void {
+    selectedAgentId = agent.id;
+    minimizedView = '';
+    activeView = strings.nav.chat;
+    notice = `Testing ${agent.name} in chat.`;
+  }
+
   async function refreshMemories(): Promise<void> {
     const response = await getJSON<MemoriesResponse>('/api/v1/memories');
     memories = response.memories ?? [];
@@ -895,6 +951,33 @@
       resetMemoryForm();
     }
     await refreshMemories();
+  }
+
+  async function updateMemoryFlags(memory: Memory, flags: Pick<Memory, 'active' | 'pinned'>): Promise<void> {
+    const response = await putJSON<MemoryResponse>(`/api/v1/memories/${memory.id}`, {
+      title: memory.title,
+      content: memory.content,
+      tags: memory.tags,
+      scope: memory.scope,
+      importance: memory.importance,
+      pinned: flags.pinned,
+      active: flags.active,
+      source: memory.source,
+      source_message_id: memory.source_message_id ?? '',
+      agent_id: memory.agent_id ?? '',
+      conversation_id: memory.conversation_id ?? ''
+    });
+    memories = memories.map((item) => (item.id === memory.id ? response.memory : item));
+  }
+
+  async function toggleMemoryActive(memory: Memory): Promise<void> {
+    await updateMemoryFlags(memory, { active: !memory.active, pinned: memory.pinned });
+    notice = memory.active ? 'Memory disabled.' : 'Memory enabled.';
+  }
+
+  async function toggleMemoryPinned(memory: Memory): Promise<void> {
+    await updateMemoryFlags(memory, { active: memory.active, pinned: !memory.pinned });
+    notice = memory.pinned ? 'Memory unpinned.' : 'Memory pinned.';
   }
 
   async function rememberMessage(message: Message): Promise<void> {
@@ -1119,6 +1202,32 @@
     notice = 'Task deleted.';
   }
 
+  async function toggleTaskState(record: TaskRecord): Promise<void> {
+    const nextState = record.task.state === 'enabled' ? 'disabled' : 'enabled';
+    const response = await putJSON<TaskResponse>(`/api/v1/tasks/${record.task.id}`, {
+      name: record.task.name,
+      description: record.task.description,
+      task_type: record.task.task_type,
+      state: nextState,
+      agent_id: record.task.agent_id ?? '',
+      provider_id: record.task.provider_id ?? '',
+      model: record.task.model ?? '',
+      prompt: record.task.prompt,
+      tool_policy: record.task.tool_policy,
+      max_retries: record.task.max_retries,
+      timeout_ms: record.task.timeout_ms,
+      concurrency_policy: record.task.concurrency_policy,
+      schedule_mode: record.schedule.mode,
+      cron_expression: record.schedule.cron_expression ?? '',
+      interval_seconds: record.schedule.interval_seconds ?? 0,
+      run_at: record.schedule.run_at ?? '',
+      timezone: record.schedule.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    });
+    const nextRecord = { task: response.task, schedule: response.schedule };
+    taskRecords = taskRecords.map((item) => (item.task.id === response.task.id ? nextRecord : item));
+    notice = nextState === 'enabled' ? 'Task enabled.' : 'Task disabled.';
+  }
+
   async function runTask(taskId: string): Promise<void> {
     const response = await postJSON<TaskRunResponse>(`/api/v1/tasks/${taskId}/run`);
     taskRuns = [response.run, ...taskRuns];
@@ -1181,12 +1290,27 @@
     notice = 'Feedback removed.';
   }
 
-  async function regenerateWithFeedback(message: Message): Promise<void> {
+  async function editMessage(message: Message): Promise<void> {
+    const content = window.prompt('Edit message and branch from here', message.content);
+    if (!content || content.trim() === message.content.trim()) {
+      return;
+    }
+    await patchStream(
+      `/api/v1/messages/${message.id}`,
+      { content: content.trim(), provider_id: selectedProviderId, model: selectedModel },
+      handleChatEvent
+    );
+    activeRunId = '';
+    await Promise.all([selectConversation(selectedConversationId), refreshConversations()]);
+  }
+
+  async function regenerateWithFeedback(message: Message, instructionOverride = ''): Promise<void> {
     const feedback = feedbackByMessage[message.id];
     const instruction =
-      feedback?.rating === 'negative'
+      instructionOverride ||
+      (feedback?.rating === 'negative'
         ? `Address this feedback reason: ${feedback.reason || negativeFeedbackReason}. Preserve the original user intent and produce a better answer.`
-        : 'Regenerate the response with a clearer and more useful answer.';
+        : 'Regenerate the response with a clearer and more useful answer.');
     await postStream(
       `/api/v1/messages/${message.id}/regenerate`,
       { provider_id: selectedProviderId, model: selectedModel, regeneration_instruction: instruction },
@@ -1276,6 +1400,38 @@
   function messageFromError(error: unknown): string {
     return error instanceof Error ? error.message : 'The request failed.';
   }
+
+  function windowIcon(view: string): IconName {
+    if (view === strings.nav.agents) return 'agent';
+    if (view === strings.nav.memories) return 'brain';
+    if (view === strings.nav.tasks) return 'tasks';
+    if (view === strings.nav.mcp) return 'tools';
+    if (view === strings.nav.settings) return 'gear';
+    return 'window';
+  }
+
+  function windowSize(view: string): { width: number; height: number } {
+    if (view === strings.nav.settings) return { width: 980, height: 700 };
+    if (view === strings.nav.tasks) return { width: 860, height: 660 };
+    if (view === strings.nav.mcp) return { width: 860, height: 640 };
+    if (view === strings.nav.agents) return { width: 820, height: 640 };
+    return { width: 800, height: 620 };
+  }
+
+  function closeWorkspaceWindow(): void {
+    minimizedView = '';
+    activeView = strings.nav.chat;
+  }
+
+  function minimizeWorkspaceWindow(): void {
+    minimizedView = activeView;
+    activeView = strings.nav.chat;
+  }
+
+  function restoreWorkspaceWindow(view: string): void {
+    minimizedView = '';
+    activeView = view;
+  }
 </script>
 
 {#if loading}
@@ -1315,90 +1471,124 @@
   <AppShell
     bind:activeView
     {conversations}
+    {minimizedView}
     {navItems}
     onArchiveConversation={archiveConversation}
     onCreateConversation={createConversation}
     onDeleteConversation={deleteConversation}
     onLogout={logout}
     onRenameConversation={renameConversation}
+    onRestoreWindow={restoreWorkspaceWindow}
     onSelectConversation={selectConversation}
+    onUnarchiveConversation={unarchiveConversation}
     {selectedConversationId}
-    {status}
     {submitting}
     {user}
   >
-    {#if notice}
-      <Notice tone="success">{notice}</Notice>
-    {/if}
-    {#if errorMessage}
-      <Notice tone="error">{errorMessage}</Notice>
-    {/if}
+    <div class="workspace-notices">
+      {#if notice}
+        <Notice tone="success">{notice}</Notice>
+      {/if}
+      {#if errorMessage}
+        <Notice tone="error">{errorMessage}</Notice>
+      {/if}
+    </div>
 
-      {#if activeView === strings.nav.settings}
-        <SettingsView
-          bind:replyPresetDescription
-          bind:replyPresetInstruction
-          bind:replyPresetName
-          {feedbackStats}
-          onCreateReplyPreset={createReplyPreset}
-          onRefreshDiagnostics={refreshDiagnostics}
-          onRefreshFeedbackStats={refreshFeedbackStats}
-          onRefreshSessions={refreshSessions}
-          onResetReplyPresets={resetReplyPresets}
-          onRevokeSession={revokeSession}
-          onSaveModelRole={saveModelRole}
-          onToggleReplyPreset={toggleReplyPreset}
-          {providerModels}
-          {providers}
-          {replyPresets}
-          {sessions}
-          {status}
-          {submitting}
-          bind:chatRoleEntries
-          bind:utilityRoleEntries
-          bind:visionRoleEntries
-          {user}
-        />
-      {:else}
-        {#if activeView === strings.nav.chat}
-          <ChatView
-            {activeRunId}
-            {agents}
-            bind:composer
-            {feedbackByMessage}
-            {messages}
-            bind:negativeFeedbackReason
-            onApproveToolCall={approveToolCall}
-            onClearFeedback={clearFeedback}
-            onClearSummary={clearSummary}
-            onDenyToolCall={denyToolCall}
-            onGenerateReplyDraft={generateReplyDraft}
-            onInsertReplyDraft={insertReplyDraft}
-            onRefreshModels={refreshModels}
-            onRefreshPendingToolApprovals={refreshPendingToolApprovals}
-            onRegenerateSummary={regenerateSummary}
-            onRegenerateWithFeedback={regenerateWithFeedback}
-            onRememberMessage={rememberMessage}
-            onSelectReplySource={selectReplySource}
-            onSendMessage={sendMessage}
-            onStopGeneration={stopGeneration}
-            onSubmitFeedback={submitFeedback}
-            {pendingToolApprovals}
+    <ChatView
+      {activeRunId}
+      {agents}
+      bind:composer
+      {feedbackByMessage}
+      {messages}
+      bind:negativeFeedbackReason
+      onApproveToolCall={approveToolCall}
+      onClearFeedback={clearFeedback}
+      onClearSummary={clearSummary}
+      onDenyToolCall={denyToolCall}
+      onEditMessage={editMessage}
+      onGenerateReplyDraft={generateReplyDraft}
+      onInsertReplyDraft={insertReplyDraft}
+      onRefreshPendingToolApprovals={refreshPendingToolApprovals}
+      onRegenerateSummary={regenerateSummary}
+      onRegenerateWithFeedback={regenerateWithFeedback}
+      onRememberMessage={rememberMessage}
+      onSelectReplySource={selectReplySource}
+      onSendMessage={sendMessage}
+      onStopGeneration={stopGeneration}
+      onSubmitFeedback={submitFeedback}
+      {pendingToolApprovals}
+      {providerModels}
+      {providers}
+      bind:replyCustomInstruction
+      bind:replyDraft
+      {replyPresets}
+      renderMarkdown={renderMarkdown}
+      {runMemories}
+      {selectedConversation}
+      bind:selectedAgentId
+      bind:selectedModel
+      bind:selectedProviderId
+      bind:selectedReplyPresetId
+      bind:selectedReplySourceId
+      {submitting}
+      {toolCards}
+    />
+
+    {#if activeView !== strings.nav.chat && minimizedView !== activeView}
+      <WorkspaceWindow
+        height={windowSize(activeView).height}
+        icon={windowIcon(activeView)}
+        id={`workspace-${activeView.toLowerCase().replaceAll(' ', '-')}`}
+        onActivate={() => undefined}
+        onClose={closeWorkspaceWindow}
+        onMinimize={minimizeWorkspaceWindow}
+        title={activeView}
+        width={windowSize(activeView).width}
+      >
+        {#if activeView === strings.nav.settings}
+          <SettingsView
+            bind:replyPresetDescription
+            bind:replyPresetInstruction
+            bind:replyPresetName
+            {feedbackStats}
+            onCreateReplyPreset={createReplyPreset}
+            onRefreshDiagnostics={refreshDiagnostics}
+            onRefreshFeedbackStats={refreshFeedbackStats}
+            onRefreshSessions={refreshSessions}
+            onResetReplyPresets={resetReplyPresets}
+            onRevokeSession={revokeSession}
+            onSaveModelRole={saveModelRole}
+            onToggleReplyPreset={toggleReplyPreset}
             {providerModels}
             {providers}
-            bind:replyCustomInstruction
-            bind:replyDraft
             {replyPresets}
-            renderMarkdown={renderMarkdown}
-            {runMemories}
-            {selectedConversation}
-            bind:selectedAgentId
-            bind:selectedModel
-            bind:selectedProviderId
-            bind:selectedReplyPresetId
-            bind:selectedReplySourceId
+            {sessions}
+            {status}
             {submitting}
-            {toolCards}
+            bind:chatRoleEntries
+            bind:utilityRoleEntries
+            bind:visionRoleEntries
+            {user}
+            bind:providerApiKey
+            bind:providerApiKeyEnvRef
+            bind:providerBaseUrl
+            bind:providerCustomHeaders
+            bind:providerDefaultModel
+            bind:providerEnabled
+            bind:providerFallbackModel
+            bind:providerName
+            bind:providerOrganization
+            bind:providerProject
+            bind:providerTimeoutMS
+            editingProviderId={editingProviderId}
+            onCancelProviderEdit={resetProviderForm}
+            onDeleteProvider={deleteProvider}
+            onEditProvider={editProvider}
+            onRefreshProviders={refreshProviders}
+            onRefreshProviderModels={refreshProviderModels}
+            onSubmitProvider={createProvider}
+            onTestProvider={testProvider}
+            onToggleProviderEnabled={toggleProviderEnabled}
           />
         {:else if activeView === strings.nav.agents}
           <AgentsView
@@ -1422,6 +1612,8 @@
             onEdit={editAgent}
             onRefresh={refreshAgents}
             onSubmit={createAgent}
+            onTest={testAgent}
+            onToggleActive={toggleAgentActive}
             {providerModels}
             {providers}
           />
@@ -1441,6 +1633,8 @@
             onEdit={editMemory}
             onRefresh={refreshMemories}
             onSubmit={createMemory}
+            onToggleActive={toggleMemoryActive}
+            onTogglePinned={toggleMemoryPinned}
           />
         {:else if activeView === strings.nav.tasks}
           <TasksView
@@ -1476,6 +1670,7 @@
             onRunTask={runTask}
             onShowEvents={showTaskRunEvents}
             onSubmit={createTask}
+            onToggleState={toggleTaskState}
             {providerModels}
             {providers}
             {submitting}
@@ -1507,38 +1702,12 @@
             onTest={testMCPServer}
             onUpdateToolPermission={updateToolPermission}
           />
-        {:else if activeView === strings.nav.providers}
-          <ProvidersView
-            bind:providerApiKey
-            bind:providerApiKeyEnvRef
-            bind:providerBaseUrl
-            bind:providerCustomHeaders
-            bind:providerDefaultModel
-            bind:providerEnabled
-            bind:providerFallbackModel
-            bind:providerName
-            bind:providerOrganization
-            bind:providerProject
-            bind:providerTimeoutMS
-            editingProviderId={editingProviderId}
-            onCancelEdit={resetProviderForm}
-            onDelete={deleteProvider}
-            onEdit={editProvider}
-            onRefresh={refreshProviders}
-            onRefreshModels={refreshProviderModels}
-            onSubmit={createProvider}
-            onTest={testProvider}
-            {providerModels}
-            {providers}
-            {submitting}
-          />
         {:else}
-          <section class="panel" aria-labelledby="screen-title">
-            <p class="eyebrow">{strings.workspace.title}</p>
-            <h2 id="screen-title">{activeView}</h2>
+          <section class="window-panel">
             <p>{strings.workspace.emptyScreen}</p>
           </section>
         {/if}
-      {/if}
+      </WorkspaceWindow>
+    {/if}
   </AppShell>
 {/if}

@@ -76,7 +76,7 @@ describe('ModelPicker', () => {
     expect(within(dialog).getByText('Bifrost')).toBeTruthy();
     expect(within(dialog).getByText('Kimi K2.6')).toBeTruthy();
     expect(within(dialog).getByText('NVIDIA NIM/moonshotai/kimi-k2.6')).toBeTruthy();
-    expect(within(dialog).getByText(/unavailable/)).toBeTruthy();
+    expect(within(dialog).getByText(/offline/)).toBeTruthy();
   });
 
   it('accepts a manual full model ID', async () => {

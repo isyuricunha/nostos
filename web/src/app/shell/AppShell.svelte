@@ -1,300 +1,250 @@
 <script lang="ts">
-  import SidebarItem from '../../components/common/SidebarItem.svelte';
-  import StatusPill from '../../components/common/StatusPill.svelte';
-  import type { Conversation, ReadyStatus, User } from '../../lib/types';
+  import { onMount } from 'svelte';
+  import Icon from '../../components/common/Icon.svelte';
+  import type { IconName } from '../../components/common/Icon.svelte';
+  import type { Conversation, User } from '../../lib/types';
   import { strings } from '../../strings';
 
   export let activeView: string;
   export let navItems: string[] = [];
   export let user: User;
-  export let status: ReadyStatus | null = null;
   export let conversations: Conversation[] = [];
   export let selectedConversationId = '';
   export let submitting = false;
+  export let minimizedView = '';
   export let onLogout: () => void | Promise<void>;
   export let onCreateConversation: () => void | Promise<void>;
   export let onSelectConversation: (conversationId: string) => void | Promise<void>;
   export let onRenameConversation: (conversation: Conversation) => void | Promise<void>;
   export let onArchiveConversation: (conversation: Conversation) => void | Promise<void>;
+  export let onUnarchiveConversation: (conversation: Conversation) => void | Promise<void>;
   export let onDeleteConversation: (conversation: Conversation) => void | Promise<void>;
+  export let onRestoreWindow: (view: string) => void = () => undefined;
 
-  const navIcons: Record<string, string> = {
-    Chat: 'C',
-    Agents: 'A',
-    Memories: 'M',
-    Tasks: 'T',
-    MCP: 'P',
-    Providers: 'I',
-    Settings: 'S'
+  const navIcons: Record<string, IconName> = {
+    Chat: 'chat',
+    Agents: 'agent',
+    Memories: 'brain',
+    Tasks: 'tasks',
+    Tools: 'tools',
+    Settings: 'gear'
   };
 
   let search = '';
+  let collapsed = false;
+  let mobileOpen = false;
+  let chatsExpanded = true;
+  let showArchived = false;
+  let showAllConversations = false;
+  let openConversationMenuId = '';
 
-  $: readyTone = (status?.ready ? 'success' : 'warning') as 'success' | 'warning';
-  $: readyLabel = status?.ready ? 'Ready' : 'Checking';
-  $: visibleConversations = conversations
-    .filter((conversation) => !conversation.archived_at)
-    .filter((conversation) => conversation.title.toLowerCase().includes(search.trim().toLowerCase()))
-    .slice(0, 40);
-  $: title = activeView === strings.nav.chat ? (conversations.find((item) => item.id === selectedConversationId)?.title ?? strings.nav.chat) : activeView;
+  onMount(() => {
+    collapsed = localStorage.getItem('nostos-sidebar-collapsed') === 'true';
+  });
+
+  $: activeConversations = conversations.filter((conversation) => !conversation.archived_at);
+  $: archivedConversations = conversations.filter((conversation) => conversation.archived_at);
+  $: searchedConversations = (showArchived ? archivedConversations : activeConversations).filter((conversation) =>
+    conversation.title.toLowerCase().includes(search.trim().toLowerCase())
+  );
+  $: visibleConversations = searchedConversations.slice(0, showAllConversations ? 60 : 12);
+  $: selectedConversation = conversations.find((conversation) => conversation.id === selectedConversationId);
+  $: messageTarget = selectedConversation?.title ?? strings.chat.newConversation;
+
+  function toggleCollapsed(): void {
+    collapsed = !collapsed;
+    localStorage.setItem('nostos-sidebar-collapsed', String(collapsed));
+  }
+
+  async function createConversation(): Promise<void> {
+    activeView = strings.nav.chat;
+    mobileOpen = false;
+    await onCreateConversation();
+  }
 
   async function openConversation(conversationId: string): Promise<void> {
     activeView = strings.nav.chat;
+    mobileOpen = false;
     await onSelectConversation(conversationId);
+  }
+
+  function openView(view: string): void {
+    activeView = view;
+    mobileOpen = false;
+  }
+
+  function initials(name: string): string {
+    return name
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join('') || 'N';
+  }
+
+  function handleConversationKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('.conversation-row-main'));
+    const index = buttons.indexOf(event.currentTarget as HTMLButtonElement);
+    if (index === -1) return;
+    event.preventDefault();
+    const nextIndex = event.key === 'ArrowDown' ? Math.min(index + 1, buttons.length - 1) : Math.max(index - 1, 0);
+    buttons[nextIndex]?.focus();
   }
 </script>
 
-<main class="app-shell chat-first-shell">
-  <aside class="sidebar chat-sidebar" aria-label="Workspace navigation">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">N</span>
-      <div>
-        <strong>{strings.appName}</strong>
-        <span>Chat-first AI workspace</span>
-      </div>
+<main class:sidebar-collapsed={collapsed} class:sidebar-open={mobileOpen} class="workspace-shell">
+  <button aria-label="Open navigation" class="mobile-sidebar-button" on:click={() => (mobileOpen = true)} type="button">
+    <Icon name="menu" size={18} />
+  </button>
+
+  {#if mobileOpen}
+    <button aria-label="Close navigation" class="sidebar-scrim" on:click={() => (mobileOpen = false)} type="button"></button>
+  {/if}
+
+  <aside class="workspace-sidebar" aria-label="Nostos workspace navigation">
+    <header class="sidebar-top">
+      <button aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} class="sidebar-icon-button" on:click={toggleCollapsed} type="button">
+        <Icon name="menu" size={17} />
+      </button>
+      <button class="sidebar-brand" on:click={createConversation} type="button">
+        <span aria-hidden="true" class="brand-glyph">N</span>
+        <span class="sidebar-label">Nostos</span>
+      </button>
+    </header>
+
+    <div class="sidebar-actions">
+      <button class="sidebar-action primary" on:click={createConversation} type="button">
+        <Icon name="plus" size={15} />
+        <span class="sidebar-label">New Chat</span>
+      </button>
+      <label class="conversation-search">
+        <span class="visually-hidden">Search conversations</span>
+        <Icon name="search" size={14} />
+        <input bind:value={search} placeholder="Search" />
+      </label>
     </div>
 
-    <button class="new-chat-button" on:click={onCreateConversation} type="button">{strings.chat.newConversation}</button>
+    <section class="sidebar-section conversation-section" aria-label="Conversations">
+      <button
+        aria-expanded={chatsExpanded}
+        class="section-toggle"
+        on:click={() => (chatsExpanded = !chatsExpanded)}
+        type="button"
+      >
+        <Icon name="chat" size={13} />
+        <span class="sidebar-label">Chats</span>
+        <span class="section-count">{searchedConversations.length}</span>
+        <Icon name="chevron-down" size={12} />
+      </button>
 
-    <label class="sidebar-search">
-      <span>Search conversations</span>
-      <input bind:value={search} placeholder="Search conversations" />
-    </label>
+      {#if chatsExpanded && !collapsed}
+        <div class="archive-toggle-row">
+          <button class:active={!showArchived} on:click={() => (showArchived = false)} type="button">Recent</button>
+          <button class:active={showArchived} on:click={() => (showArchived = true)} type="button">Archived</button>
+        </div>
 
-    <section class="conversation-nav" aria-label="Recent conversations">
-      <div class="sidebar-section-title">
-        <span>Recent</span>
-        <small>{visibleConversations.length}</small>
-      </div>
-      {#if visibleConversations.length === 0}
-        <p class="sidebar-empty">Start a chat to create persistent context.</p>
-      {:else}
-        {#each visibleConversations as conversation (conversation.id)}
-          <article class:active={conversation.id === selectedConversationId} class="conversation-nav-item">
-            <button on:click={() => openConversation(conversation.id)} type="button">
-              <strong>{conversation.title}</strong>
-              <span>{new Date(conversation.updated_at).toLocaleDateString()}</span>
-            </button>
-            <div class="conversation-actions" aria-label={`Actions for ${conversation.title}`}>
-              <button aria-label="Rename conversation" on:click={() => onRenameConversation(conversation)} type="button">R</button>
-              <button aria-label="Archive conversation" on:click={() => onArchiveConversation(conversation)} type="button">A</button>
-              <button aria-label="Delete conversation" on:click={() => onDeleteConversation(conversation)} type="button">D</button>
-            </div>
-          </article>
-        {/each}
+        <div class="conversation-list" role="listbox">
+          {#if visibleConversations.length === 0}
+            <p class="sidebar-empty">{showArchived ? 'No archived conversations.' : strings.chat.noConversations}</p>
+          {:else}
+            {#each visibleConversations as conversation (conversation.id)}
+              <article class:active={conversation.id === selectedConversationId} class="conversation-row">
+                <button
+                  aria-selected={conversation.id === selectedConversationId}
+                  class="conversation-row-main"
+                  on:click={() => openConversation(conversation.id)}
+                  on:keydown={handleConversationKeydown}
+                  role="option"
+                  type="button"
+                >
+                  <Icon name={conversation.archived_at ? 'archive' : 'chat'} size={13} />
+                  <span class="conversation-title">{conversation.title}</span>
+                  {#if conversation.summary}
+                    <span aria-label="Summary available" class="conversation-dot"></span>
+                  {/if}
+                </button>
+                <button
+                  aria-expanded={openConversationMenuId === conversation.id}
+                  aria-label={`Conversation menu for ${conversation.title}`}
+                  class="row-menu-button"
+                  on:click={() => (openConversationMenuId = openConversationMenuId === conversation.id ? '' : conversation.id)}
+                  type="button"
+                >
+                  <Icon name="kebab" size={14} />
+                </button>
+                {#if openConversationMenuId === conversation.id}
+                  <div class="row-menu" role="menu">
+                    <button on:click={() => { openConversationMenuId = ''; onRenameConversation(conversation); }} type="button">
+                      <Icon name="edit" size={13} /> Rename
+                    </button>
+                    {#if conversation.archived_at}
+                      <button on:click={() => { openConversationMenuId = ''; onUnarchiveConversation(conversation); }} type="button">
+                        <Icon name="archive" size={13} /> Restore
+                      </button>
+                    {:else}
+                      <button on:click={() => { openConversationMenuId = ''; onArchiveConversation(conversation); }} type="button">
+                        <Icon name="archive" size={13} /> Archive
+                      </button>
+                    {/if}
+                    <button class="danger" on:click={() => { openConversationMenuId = ''; onDeleteConversation(conversation); }} type="button">
+                      <Icon name="trash" size={13} /> Delete
+                    </button>
+                  </div>
+                {/if}
+              </article>
+            {/each}
+          {/if}
+        </div>
+
+        {#if searchedConversations.length > visibleConversations.length}
+          <button class="show-more" on:click={() => (showAllConversations = true)} type="button">
+            Show {searchedConversations.length - visibleConversations.length} more
+          </button>
+        {/if}
       {/if}
     </section>
 
-    <nav class="shortcut-nav" aria-label="Workspace shortcuts">
+    <nav class="workspace-shortcuts" aria-label="Workspace windows">
       {#each navItems as item (item)}
-        <SidebarItem
-          active={activeView === item}
-          icon={navIcons[item] ?? item.slice(0, 1)}
-          label={item}
-          onSelect={() => (activeView = item)}
-        />
+        <button
+          class:active={activeView === item}
+          class="shortcut-row"
+          on:click={() => openView(item)}
+          type="button"
+        >
+          <Icon name={navIcons[item] ?? 'grid'} size={15} />
+          <span class="sidebar-label">{item}</span>
+        </button>
       {/each}
     </nav>
 
-    <div class="sidebar-footer">
-      <StatusPill status={readyLabel} tone={readyTone} />
-      <div class="sidebar-user">
-        <span>{user.display_name}</span>
-        <small>{user.email}</small>
-      </div>
-      <button disabled={submitting} on:click={onLogout} type="button">{strings.auth.signOut}</button>
-    </div>
+    <footer class="sidebar-footer">
+      {#if minimizedView}
+        <button class="minimized-chip" on:click={() => onRestoreWindow(minimizedView)} type="button">
+          <Icon name={navIcons[minimizedView] ?? 'window'} size={14} />
+          <span class="sidebar-label">{minimizedView}</span>
+        </button>
+      {/if}
+      <button class="profile-button" type="button" title={user.email}>
+        <span class="profile-avatar">{initials(user.display_name)}</span>
+        <span class="profile-copy sidebar-label">
+          <strong>{user.display_name}</strong>
+          <small>{messageTarget}</small>
+        </span>
+      </button>
+      <button class="shortcut-row settings-row" class:active={activeView === strings.nav.settings} on:click={() => openView(strings.nav.settings)} type="button">
+        <Icon name="gear" size={15} />
+        <span class="sidebar-label">Settings</span>
+      </button>
+      <button class="logout-button" disabled={submitting} on:click={onLogout} type="button">
+        <Icon name="close" size={14} />
+        <span class="sidebar-label">{strings.auth.signOut}</span>
+      </button>
+    </footer>
   </aside>
 
-  <section class="workspace" aria-labelledby="workspace-title">
-    <header class="topbar compact-topbar">
-      <div>
-        <p class="eyebrow">{activeView === strings.nav.chat ? 'Conversation' : 'Workspace'}</p>
-        <h1 id="workspace-title">{title}</h1>
-      </div>
-      <div class="topbar-meta">
-        {#if status}
-          <StatusPill status={`${status.database.driver ?? 'database'} ${status.database.ok ? 'online' : 'offline'}`} tone={status.database.ok ? 'success' : 'danger'} />
-        {/if}
-        <span>{new Date().toLocaleDateString()}</span>
-      </div>
-    </header>
-
+  <section class="workspace-canvas" aria-label="Chat workspace">
     <slot />
   </section>
 </main>
-
-<style>
-  .chat-first-shell {
-    grid-template-columns: minmax(270px, 320px) 1fr;
-  }
-
-  .chat-sidebar {
-    gap: var(--space-3);
-    overflow-y: auto;
-  }
-
-  .new-chat-button {
-    width: 100%;
-    justify-content: center;
-    border-color: rgba(242, 183, 99, 0.42);
-    background:
-      linear-gradient(180deg, rgba(255, 221, 156, 0.17), rgba(213, 141, 45, 0.08)),
-      rgba(213, 141, 45, 0.16);
-    color: var(--color-accent-strong);
-    font-weight: 760;
-  }
-
-  .sidebar-search {
-    gap: var(--space-2);
-  }
-
-  .sidebar-search span {
-    color: var(--color-subtle);
-    font-size: var(--font-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .sidebar-search input {
-    padding: 9px 10px;
-    border-radius: var(--radius-sm);
-  }
-
-  .conversation-nav {
-    display: grid;
-    min-height: 0;
-    gap: var(--space-2);
-    overflow: auto;
-  }
-
-  .sidebar-section-title {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    color: var(--color-subtle);
-    font-size: var(--font-xs);
-    font-weight: 720;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .sidebar-empty {
-    margin: 0;
-    border: 1px dashed var(--color-border-muted);
-    border-radius: var(--radius-md);
-    padding: var(--space-3);
-    color: var(--color-subtle);
-    font-size: var(--font-sm);
-  }
-
-  .conversation-nav-item {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    align-items: center;
-    gap: var(--space-2);
-    border: 1px solid transparent;
-    border-radius: var(--radius-md);
-    background: transparent;
-    padding: 4px;
-    transition:
-      border-color var(--duration-fast) var(--ease-standard),
-      background-color var(--duration-fast) var(--ease-standard);
-  }
-
-  .conversation-nav-item:hover,
-  .conversation-nav-item.active {
-    border-color: var(--color-border-muted);
-    background: rgba(255, 255, 255, 0.035);
-  }
-
-  .conversation-nav-item.active {
-    background: var(--color-accent-muted);
-  }
-
-  .conversation-nav-item > button {
-    display: grid;
-    min-width: 0;
-    gap: 2px;
-    border: 0;
-    background: transparent;
-    padding: 7px;
-    text-align: left;
-    transform: none;
-  }
-
-  .conversation-nav-item strong,
-  .conversation-nav-item span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .conversation-nav-item strong {
-    color: var(--color-text);
-    font-size: var(--font-sm);
-  }
-
-  .conversation-nav-item span {
-    color: var(--color-subtle);
-    font-size: var(--font-xs);
-  }
-
-  .conversation-actions {
-    display: flex;
-    gap: 3px;
-    opacity: 0;
-    transition: opacity var(--duration-fast) var(--ease-standard);
-  }
-
-  .conversation-nav-item:hover .conversation-actions,
-  .conversation-nav-item:focus-within .conversation-actions {
-    opacity: 1;
-  }
-
-  .conversation-actions button {
-    display: grid;
-    width: 24px;
-    height: 24px;
-    place-items: center;
-    border-radius: var(--radius-xs);
-    padding: 0;
-    color: var(--color-subtle);
-    font-size: 0.68rem;
-  }
-
-  .shortcut-nav {
-    display: grid;
-    gap: var(--space-1);
-    border-top: 1px solid var(--color-border-muted);
-    padding-top: var(--space-3);
-  }
-
-  .chat-sidebar :global(.sidebar-footer) {
-    gap: var(--space-2);
-    padding-top: var(--space-3);
-  }
-
-  .compact-topbar h1 {
-    max-width: min(68vw, 880px);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  @media (max-width: 860px) {
-    .chat-first-shell {
-      grid-template-columns: 1fr;
-    }
-
-    .chat-sidebar {
-      position: relative;
-      min-height: auto;
-      max-height: none;
-    }
-
-    .conversation-nav {
-      max-height: 260px;
-    }
-  }
-</style>

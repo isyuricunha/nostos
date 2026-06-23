@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import Icon from '../common/Icon.svelte';
   import type { Provider, ProviderModel } from '../../lib/types';
 
   export let label = 'Model';
@@ -11,9 +13,16 @@
   export let compact = false;
   export let fixedProviderId = '';
 
+  const PAGE_SIZE = 80;
+
   let open = false;
   let query = '';
   let manualModel = '';
+  let visibleLimit = PAGE_SIZE;
+  let activeIndex = 0;
+  let searchInput: HTMLInputElement;
+  let root: HTMLDivElement;
+  let previousQuery = '';
 
   $: providerById = Object.fromEntries(providers.map((provider) => [provider.id, provider]));
   $: selectedProvider = providerById[selectedProviderId];
@@ -31,13 +40,39 @@
     .filter((model) => {
       if (!normalizedQuery) return true;
       const provider = providerById[model.provider_id];
-      return [model.model_id, model.display_name ?? '', provider?.name ?? '', ...(model.capabilities ?? [])]
+      return [model.model_id, model.display_name ?? '', provider?.name ?? '', provider?.health_status ?? '', ...(model.capabilities ?? [])]
         .join(' ')
         .toLowerCase()
         .includes(normalizedQuery);
-    })
-    .slice(0, 120);
-  $: groupedModels = groupModels(filteredModels);
+    });
+  $: renderedModels = filteredModels.slice(0, visibleLimit);
+  $: groupedModels = groupModels(renderedModels);
+  $: if (query !== previousQuery) {
+    previousQuery = query;
+    visibleLimit = PAGE_SIZE;
+    activeIndex = 0;
+  }
+
+  onMount(() => {
+    function handleDocumentClick(event: MouseEvent): void {
+      if (!open || !root) return;
+      const target = event.target;
+      if (target instanceof Node && !root.contains(target)) {
+        open = false;
+      }
+    }
+    document.addEventListener('click', handleDocumentClick);
+    return () => document.removeEventListener('click', handleDocumentClick);
+  });
+
+  function toggleOpen(): void {
+    open = !open;
+    if (open) {
+      visibleLimit = PAGE_SIZE;
+      activeIndex = Math.max(0, renderedModels.findIndex((model) => model.provider_id === selectedProviderId && model.model_id === selectedModelId));
+      setTimeout(() => searchInput?.focus(), 0);
+    }
+  }
 
   function selectModel(model: ProviderModel): void {
     selectedProviderId = model.provider_id;
@@ -75,26 +110,69 @@
     }
     return true;
   }
+
+  function modelStatus(model: ProviderModel): string {
+    const provider = providerById[model.provider_id];
+    if (model.available === false || model.enabled === false) return 'offline';
+    return provider?.health_status || 'unknown';
+  }
+
+  async function copyModelId(modelId: string): Promise<void> {
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(modelId);
+    }
+  }
+
+  function handlePickerKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      open = false;
+      event.stopPropagation();
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      activeIndex = Math.min(activeIndex + 1, renderedModels.length - 1);
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      activeIndex = Math.max(activeIndex - 1, 0);
+      return;
+    }
+    if (event.key === 'Enter' && renderedModels[activeIndex]) {
+      event.preventDefault();
+      selectModel(renderedModels[activeIndex]);
+    }
+  }
 </script>
 
-<div class:compact class="model-picker">
+<div bind:this={root} class:compact class="model-picker">
   <span class="model-picker-label">{label}</span>
   <button
     aria-expanded={open}
     aria-label={`${label}: ${selectedLabel}`}
     class="model-picker-trigger"
-    on:click={() => (open = !open)}
+    on:click={toggleOpen}
     type="button"
   >
+    <Icon name="model" size={13} />
     <span>{selectedLabel}</span>
-    {#if selectedProvider}
-      <small>{selectedProvider.name}</small>
-    {/if}
+    <small>{selectedProvider?.name ?? 'Manual'}</small>
+    <Icon name="chevron-down" size={11} />
   </button>
   {#if open}
-    <div class="model-picker-panel" role="dialog" aria-label={`${label} picker`}>
-      <input bind:value={query} placeholder="Search provider, model, capability" />
-      <div class="model-picker-list" role="listbox">
+    <div class="model-picker-panel" on:keydown={handlePickerKeydown} role="dialog" aria-label={`${label} picker`} tabindex="-1">
+      <div class="model-picker-search-row">
+        <Icon name="search" size={13} />
+        <input bind:this={searchInput} bind:value={query} placeholder="Search provider, model, capability" />
+      </div>
+      <div class="model-picker-count">
+        <span>{filteredModels.length} matches</span>
+        {#if renderedModels.length < filteredModels.length}
+          <span>showing {renderedModels.length}</span>
+        {/if}
+      </div>
+      <div class="model-picker-list" role="listbox" aria-label={`${label} results`}>
         {#if groupedModels.length === 0}
           <p>No cached models match this search.</p>
         {:else}
@@ -102,32 +180,55 @@
             <section>
               <header>
                 <strong>{group.provider?.name ?? 'Unknown provider'}</strong>
-                <small>{group.provider?.health_status ?? 'unknown'}</small>
+                <small>{group.provider?.health_status ?? 'unknown'} · {group.models.length}</small>
               </header>
               {#each group.models as model (model.id)}
-                <button
+                <div
                   aria-selected={model.provider_id === selectedProviderId && model.model_id === selectedModelId}
+                  class:keyboard-active={renderedModels[activeIndex]?.id === model.id}
                   class:offline={model.available === false || model.enabled === false}
                   class:selected={model.provider_id === selectedProviderId && model.model_id === selectedModelId}
+                  class="model-option"
                   on:click={() => selectModel(model)}
+                  on:keydown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      selectModel(model);
+                    }
+                  }}
                   role="option"
-                  type="button"
+                  tabindex="0"
+                  title={model.model_id}
                 >
-                  <span>{model.display_name || model.model_id}</span>
+                  <span class="model-name">{model.display_name || model.model_id}</span>
                   <code>{model.model_id}</code>
                   <small>
-                    {model.manually_added ? 'manual' : 'cached'}
-                    {model.available === false ? ' / unavailable' : ''}
+                    {modelStatus(model)}
+                    {model.manually_added ? ' / manual' : ' / cached'}
                     {#if model.capabilities?.length}
                       / {model.capabilities.join(', ')}
                     {/if}
                   </small>
-                </button>
+                  <span class="model-row-actions">
+                    <button
+                      aria-label={`Copy ${model.model_id}`}
+                      on:click|stopPropagation={() => copyModelId(model.model_id)}
+                      type="button"
+                    >
+                      <Icon name="copy" size={12} />
+                    </button>
+                  </span>
+                </div>
               {/each}
             </section>
           {/each}
         {/if}
       </div>
+      {#if renderedModels.length < filteredModels.length}
+        <button class="model-load-more" on:click={() => (visibleLimit += PAGE_SIZE)} type="button">
+          Load more ({filteredModels.length - renderedModels.length} remaining)
+        </button>
+      {/if}
       {#if allowManual}
         <form class="manual-model" on:submit|preventDefault={useManualModel}>
           <input bind:value={manualModel} placeholder="Type an unlisted full model ID" />
@@ -137,132 +238,3 @@
     </div>
   {/if}
 </div>
-
-<style>
-  .model-picker {
-    position: relative;
-    display: grid;
-    gap: var(--space-2);
-    min-width: min(100%, 280px);
-  }
-
-  .model-picker.compact {
-    min-width: min(100%, 240px);
-  }
-
-  .model-picker-label {
-    color: var(--color-subtle);
-    font-size: var(--font-xs);
-    font-weight: 720;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .model-picker-trigger {
-    display: grid;
-    min-width: 0;
-    gap: 2px;
-    text-align: left;
-  }
-
-  .model-picker-trigger span,
-  .model-picker-trigger small {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .model-picker-trigger small {
-    color: var(--color-subtle);
-    font-size: var(--font-xs);
-  }
-
-  .model-picker-panel {
-    position: absolute;
-    z-index: 20;
-    top: calc(100% + var(--space-2));
-    right: 0;
-    display: grid;
-    width: min(680px, calc(100vw - 32px));
-    max-height: min(620px, calc(100vh - 180px));
-    gap: var(--space-3);
-    border: 1px solid var(--color-border-muted);
-    border-radius: var(--radius-lg);
-    background: var(--color-panel-elevated);
-    box-shadow: var(--shadow-soft);
-    padding: var(--space-3);
-  }
-
-  .model-picker-list {
-    display: grid;
-    gap: var(--space-3);
-    overflow: auto;
-  }
-
-  .model-picker-list section {
-    display: grid;
-    gap: var(--space-2);
-  }
-
-  .model-picker-list header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    color: var(--color-muted);
-    font-size: var(--font-sm);
-  }
-
-  .model-picker-list button {
-    display: grid;
-    gap: 2px;
-    border-radius: var(--radius-md);
-    padding: 10px;
-    text-align: left;
-    transform: none;
-  }
-
-  .model-picker-list button.selected {
-    border-color: var(--color-border-strong);
-    background: var(--color-accent-muted);
-  }
-
-  .model-picker-list button.offline {
-    opacity: 0.62;
-  }
-
-  .model-picker-list span,
-  .model-picker-list code,
-  .model-picker-list small {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .model-picker-list code {
-    color: var(--color-text-soft);
-    font-size: var(--font-xs);
-  }
-
-  .model-picker-list small {
-    color: var(--color-subtle);
-    font-size: var(--font-xs);
-  }
-
-  .manual-model {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: var(--space-2);
-  }
-
-  @media (max-width: 720px) {
-    .model-picker-panel {
-      position: fixed;
-      inset: auto var(--space-3) var(--space-3) var(--space-3);
-      width: auto;
-    }
-
-    .manual-model {
-      grid-template-columns: 1fr;
-    }
-  }
-</style>
