@@ -146,7 +146,7 @@
   }
 </script>
 
-<div bind:this={root} class:compact class="model-picker">
+<div bind:this={root} class="model-picker" class:compact>
   <span class="model-picker-label">{label}</span>
   <button
     aria-expanded={open}

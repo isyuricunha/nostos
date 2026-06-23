@@ -68,7 +68,7 @@
   }
 </script>
 
-<div class:editor-open={formOpen} class="workspace-module-grid">
+<div class="workspace-module-grid" class:editor-open={formOpen}>
   <section class="window-list-pane" aria-label="Agents">
     <header class="window-panel-toolbar">
       <div>

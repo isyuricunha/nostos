@@ -5,7 +5,7 @@
   export let onSelect: () => void = () => undefined;
 </script>
 
-<button class:active class="sidebar-item" on:click={onSelect} type="button">
+<button class="sidebar-item" class:active on:click={onSelect} type="button">
   <span class="sidebar-item-icon" aria-hidden="true">{icon || label.slice(0, 1)}</span>
   <span>{label}</span>
 </button>

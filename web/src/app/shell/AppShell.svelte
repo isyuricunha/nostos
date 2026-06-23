@@ -93,7 +93,7 @@
   }
 </script>
 
-<main class:sidebar-collapsed={collapsed} class:sidebar-open={mobileOpen} class="workspace-shell">
+<main class="workspace-shell" class:sidebar-collapsed={collapsed} class:sidebar-open={mobileOpen}>
   <button aria-label="Open navigation" class="mobile-sidebar-button" on:click={() => (mobileOpen = true)} type="button">
     <Icon name="menu" size={18} />
   </button>
@@ -149,7 +149,7 @@
             <p class="sidebar-empty">{showArchived ? 'No archived conversations.' : strings.chat.noConversations}</p>
           {:else}
             {#each visibleConversations as conversation (conversation.id)}
-              <article class:active={conversation.id === selectedConversationId} class="conversation-row">
+              <article class="conversation-row" class:active={conversation.id === selectedConversationId}>
                 <button
                   aria-selected={conversation.id === selectedConversationId}
                   class="conversation-row-main"

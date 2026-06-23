@@ -124,6 +124,7 @@
 
   <div class="conversation-meta">
     <button
+      aria-label={`Conversation menu: ${title}, ${messageCountLabel}`}
       aria-expanded={summaryOpen}
       class:has-summary={Boolean(selectedConversation?.summary)}
       class="conversation-meta-button"
@@ -176,7 +177,7 @@
       </div>
     {:else}
       {#each messages as message, index (message.id)}
-        <article class:assistant={message.role === 'assistant'} class:user={message.role === 'user'} class="chat-message">
+        <article class="chat-message" class:assistant={message.role === 'assistant'} class:user={message.role === 'user'}>
           <header class="message-header">
             <strong>{message.role === 'user' ? 'You' : message.model || activeModelLabel}</strong>
             <span>{formatTime(message.created_at)}</span>

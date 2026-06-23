@@ -49,8 +49,10 @@
 
   function centerPosition(targetWidth: number, targetHeight: number): { left: number; top: number } {
     if (typeof window === 'undefined') return { left: 260, top: 80 };
+    const leftOffset = workspaceLeftOffset();
+    const availableWidth = Math.max(targetWidth, window.innerWidth - leftOffset);
     return clampPosition(
-      Math.round((window.innerWidth - targetWidth) / 2),
+      Math.round(leftOffset + (availableWidth - targetWidth) / 2),
       Math.round((window.innerHeight - targetHeight) / 2),
       targetWidth,
       targetHeight
@@ -60,12 +62,20 @@
   function clampPosition(left: number, top: number, targetWidth: number, targetHeight: number): { left: number; top: number } {
     if (typeof window === 'undefined') return { left, top };
     const margin = 10;
-    const maxLeft = Math.max(margin, window.innerWidth - targetWidth - margin);
+    const leftOffset = workspaceLeftOffset();
+    const minLeft = leftOffset + margin;
+    const maxLeft = Math.max(minLeft, window.innerWidth - targetWidth - margin);
     const maxTop = Math.max(margin, window.innerHeight - targetHeight - margin);
     return {
-      left: Math.max(margin, Math.min(left, maxLeft)),
+      left: Math.max(minLeft, Math.min(left, maxLeft)),
       top: Math.max(margin, Math.min(top, maxTop))
     };
+  }
+
+  function workspaceLeftOffset(): number {
+    if (typeof window === 'undefined' || window.innerWidth <= 980) return 0;
+    const sidebar = document.querySelector<HTMLElement>('.workspace-sidebar');
+    return sidebar?.getBoundingClientRect().width ?? 0;
   }
 
   function persistPosition(): void {

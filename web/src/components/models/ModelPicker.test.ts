@@ -107,4 +107,16 @@ describe('ModelPicker', () => {
     expect(within(dialog).getByText('Bifrost')).toBeTruthy();
     expect(within(dialog).queryByText('Direct NVIDIA')).toBeNull();
   });
+
+  it('supports keyboard navigation and Enter selection', async () => {
+    render(ModelPicker, { label: 'Chat model', providers, models, role: 'chat' });
+
+    await fireEvent.click(screen.getByRole('button', { name: /select model/i }));
+    const dialog = screen.getByRole('dialog', { name: 'Chat model picker' });
+
+    await fireEvent.keyDown(dialog, { key: 'ArrowDown' });
+    await fireEvent.keyDown(dialog, { key: 'Enter' });
+
+    expect(screen.getByRole('button', { name: /Kimi K2.6/ })).toBeTruthy();
+  });
 });

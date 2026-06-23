@@ -111,9 +111,12 @@ html[data-reduced-motion="on"] *::after {
 
 .workspace-sidebar {
   position: relative;
-  z-index: 30;
+  z-index: 120;
+  grid-column: 1;
+  grid-row: 1;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  width: 208px;
   height: 100dvh;
   min-width: 0;
   border-right: 1px solid var(--workspace-border);
@@ -127,6 +130,7 @@ html[data-reduced-motion="on"] *::after {
 }
 
 .sidebar-collapsed .workspace-sidebar {
+  width: 58px;
   padding-inline: 7px;
 }
 
@@ -417,6 +421,8 @@ html[data-reduced-motion="on"] *::after {
 
 .workspace-canvas {
   position: relative;
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -1402,18 +1408,18 @@ kbd {
     transform: translateX(0);
   }
 
-  .mobile-sidebar-button {
+.mobile-sidebar-button {
     position: fixed;
-    z-index: 32;
+    z-index: 130;
     top: 10px;
     left: 10px;
     display: grid;
     background: rgba(8, 9, 9, 0.8) !important;
   }
 
-  .sidebar-scrim {
+.sidebar-scrim {
     position: fixed;
-    z-index: 29;
+    z-index: 110;
     inset: 0;
     display: block;
     border: 0;

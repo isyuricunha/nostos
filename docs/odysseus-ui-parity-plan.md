@@ -221,7 +221,7 @@ This is a clean-room implementation plan. The reference was inspected for intera
 - [x] Rebuild Memories, Agents, Tasks, and Tools windows.
 - [x] Restyle and harden ModelPicker for large catalogs.
 - [x] Add responsive sidebar/drawer/window behavior.
-- [ ] Add focused component and e2e coverage.
+- [x] Add focused component and e2e coverage.
 - [ ] Capture and inspect required screenshots.
 - [ ] Run required Go, pnpm, Docker, PostgreSQL, and SQLite validation.
 - [ ] Commit milestone-sized changes and push `feat/odysseus-ui-parity`.

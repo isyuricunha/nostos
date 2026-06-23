@@ -124,7 +124,7 @@
     {:else}
       <div class="memory-card-grid">
         {#each filteredMemories as memory (memory.id)}
-          <article class:inactive={!memory.active} class="memory-compact-card">
+          <article class="memory-compact-card" class:inactive={!memory.active}>
             <header>
               <span class="row-icon"><Icon name="brain" size={15} /></span>
               <div>

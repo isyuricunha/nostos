@@ -3,6 +3,6 @@
   export let interactive = false;
 </script>
 
-<section class:elevated class:interactive class="ui-card">
+<section class="ui-card" class:elevated class:interactive>
   <slot />
 </section>
